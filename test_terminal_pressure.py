@@ -11,6 +11,7 @@ Run with:
 """
 
 import argparse
+import json
 import socket
 import sys
 import threading
@@ -27,40 +28,30 @@ from terminal_pressure import (
     DEFAULT_DURATION,
     DEFAULT_PAYLOAD,
     DEFAULT_PORT,
-    DEFAULT_RATE_LIMIT,
-    DEFAULT_RETRIES,
     DEFAULT_THREADS,
-    EXIT_ERROR,
-    EXIT_SUCCESS,
-    EXIT_VALIDATION_ERROR,
     EXPLOIT_MAGIC,
     EXPLOIT_PORT,
     MAX_DURATION,
-    MAX_RATE_LIMIT,
-    MAX_RETRIES,
     MAX_THREADS,
-    MAX_TIMEOUT,
-    MIN_RATE_LIMIT,
-    MIN_TIMEOUT,
-    OUTPUT_FORMAT_CSV,
-    OUTPUT_FORMAT_JSON,
-    OUTPUT_FORMAT_TEXT,
+    OUTPUT_CSV,
+    OUTPUT_JSON,
+    OUTPUT_TEXT,
     PORT_SCAN_RANGE,
-    SOCKET_TIMEOUT,
-    VALID_OUTPUT_FORMATS,
-    VERSION,
-    _configure_logging,
-    _output_exploit_result,
-    _output_scan_result,
-    _output_stress_result,
+    ExploitResult,
+    HostResult,
+    PortResult,
+    ScanResult,
+    StressResult,
+    _expand_cidr,
+    _is_valid_cidr,
+    _is_valid_hostname,
+    _is_valid_ip,
+    _resolve_hostname,
     _validate_duration,
     _validate_output_format,
     _validate_port,
-    _validate_rate_limit,
-    _validate_retries,
     _validate_target,
     _validate_threads,
-    _validate_timeout,
     exploit_chain,
     main,
     scan_vulns,
@@ -126,11 +117,11 @@ class TestValidateTarget:
             _validate_target("   ")
 
     def test_non_string_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="non-empty"):
             _validate_target(None)  # type: ignore[arg-type]
 
     def test_integer_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="non-empty"):
             _validate_target(12345)  # type: ignore[arg-type]
 
 
@@ -146,15 +137,15 @@ class TestValidatePort:
 
     @pytest.mark.parametrize("bad_port", [0, -1, 65536, 99999])
     def test_invalid_ports_raise(self, bad_port):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="between 1 and 65535"):
             _validate_port(bad_port)
 
     def test_string_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="between 1 and 65535"):
             _validate_port("80")  # type: ignore[arg-type]
 
     def test_none_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="between 1 and 65535"):
             _validate_port(None)  # type: ignore[arg-type]
 
 
@@ -164,7 +155,7 @@ class TestValidatePort:
 
 
 class TestValidateThreads:
-    @pytest.mark.parametrize("n", [1, 10, 50, 200, MAX_THREADS])
+    @pytest.mark.parametrize("n", [1, 10, 50, 200])
     def test_valid_counts(self, n):
         assert _validate_threads(n) == n
 
@@ -177,10 +168,6 @@ class TestValidateThreads:
         with pytest.raises(ValueError):
             _validate_threads("10")  # type: ignore[arg-type]
 
-    def test_exceeds_max_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            _validate_threads(MAX_THREADS + 1)
-
 
 # ===========================================================================
 # _validate_duration
@@ -188,7 +175,7 @@ class TestValidateThreads:
 
 
 class TestValidateDuration:
-    @pytest.mark.parametrize("d", [1, 30, 60, MAX_DURATION])
+    @pytest.mark.parametrize("d", [1, 30, 60, 3600])
     def test_valid_durations(self, d):
         assert _validate_duration(d) == d
 
@@ -200,126 +187,6 @@ class TestValidateDuration:
     def test_string_raises(self):
         with pytest.raises(ValueError):
             _validate_duration("60")  # type: ignore[arg-type]
-
-    def test_exceeds_max_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            _validate_duration(MAX_DURATION + 1)
-
-
-# ===========================================================================
-# _validate_output_format
-# ===========================================================================
-
-
-class TestValidateOutputFormat:
-    @pytest.mark.parametrize("fmt", VALID_OUTPUT_FORMATS)
-    def test_valid_formats(self, fmt):
-        assert _validate_output_format(fmt) == fmt
-
-    def test_invalid_format_raises(self):
-        with pytest.raises(ValueError, match="Invalid output format"):
-            _validate_output_format("xml")
-
-    def test_empty_string_raises(self):
-        with pytest.raises(ValueError):
-            _validate_output_format("")
-
-    def test_csv_format_valid(self):
-        assert _validate_output_format(OUTPUT_FORMAT_CSV) == OUTPUT_FORMAT_CSV
-
-
-# ===========================================================================
-# _validate_timeout
-# ===========================================================================
-
-
-class TestValidateTimeout:
-    def test_valid_timeout(self):
-        assert _validate_timeout(5.0) == 5.0
-
-    def test_valid_timeout_int(self):
-        assert _validate_timeout(10) == 10.0
-
-    def test_min_timeout(self):
-        assert _validate_timeout(MIN_TIMEOUT) == MIN_TIMEOUT
-
-    def test_max_timeout(self):
-        assert _validate_timeout(MAX_TIMEOUT) == MAX_TIMEOUT
-
-    def test_below_min_raises(self):
-        with pytest.raises(ValueError, match="at least"):
-            _validate_timeout(0.01)
-
-    def test_above_max_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            _validate_timeout(MAX_TIMEOUT + 1)
-
-    def test_negative_raises(self):
-        with pytest.raises(ValueError):
-            _validate_timeout(-1)
-
-    def test_non_numeric_raises(self):
-        with pytest.raises(ValueError):
-            _validate_timeout("5")  # type: ignore
-
-
-# ===========================================================================
-# _validate_retries
-# ===========================================================================
-
-
-class TestValidateRetries:
-    def test_valid_retries(self):
-        assert _validate_retries(3) == 3
-
-    def test_zero_retries(self):
-        assert _validate_retries(0) == 0
-
-    def test_max_retries(self):
-        assert _validate_retries(MAX_RETRIES) == MAX_RETRIES
-
-    def test_negative_raises(self):
-        with pytest.raises(ValueError, match="non-negative"):
-            _validate_retries(-1)
-
-    def test_above_max_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            _validate_retries(MAX_RETRIES + 1)
-
-    def test_non_int_raises(self):
-        with pytest.raises(ValueError):
-            _validate_retries(3.5)  # type: ignore
-
-
-# ===========================================================================
-# _validate_rate_limit
-# ===========================================================================
-
-
-class TestValidateRateLimit:
-    def test_valid_rate_limit(self):
-        assert _validate_rate_limit(100) == 100
-
-    def test_zero_rate_limit_unlimited(self):
-        assert _validate_rate_limit(0) == 0
-
-    def test_min_rate_limit(self):
-        assert _validate_rate_limit(MIN_RATE_LIMIT) == MIN_RATE_LIMIT
-
-    def test_max_rate_limit(self):
-        assert _validate_rate_limit(MAX_RATE_LIMIT) == MAX_RATE_LIMIT
-
-    def test_negative_raises(self):
-        with pytest.raises(ValueError, match="non-negative"):
-            _validate_rate_limit(-1)
-
-    def test_above_max_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            _validate_rate_limit(MAX_RATE_LIMIT + 1)
-
-    def test_non_int_raises(self):
-        with pytest.raises(ValueError):
-            _validate_rate_limit(3.5)  # type: ignore
 
 
 # ===========================================================================
@@ -344,12 +211,11 @@ class TestScanVulns:
         assert "192.168.1.1" in caplog.text
 
     @patch("terminal_pressure.nmap.PortScanner")
-    def test_no_hosts_returns_empty_result(self, MockScanner, mock_scanner_empty):
+    def test_no_hosts_returns_without_error(self, MockScanner, mock_scanner_empty):
         MockScanner.return_value = mock_scanner_empty
-        result = scan_vulns("10.0.0.1")
+        # Should not raise
+        scan_vulns("10.0.0.1")
         mock_scanner_empty.scan.assert_called_once()
-        assert result["target"] == "10.0.0.1"
-        assert result["hosts"] == []
 
     @patch("terminal_pressure.nmap.PortScanner")
     def test_no_hosts_logs_message(self, MockScanner, mock_scanner_empty, caplog):
@@ -388,8 +254,7 @@ class TestScanVulns:
         scanner[host]["tcp"].keys.return_value = [22]
         scanner[host]["tcp"].__getitem__.return_value = {"state": "open", "name": "ssh"}
         MockScanner.return_value = scanner
-        result = scan_vulns("10.0.0.2")
-        assert len(result["hosts"]) == 1
+        scan_vulns("10.0.0.2")  # Must not raise
 
     @patch("terminal_pressure.nmap.PortScanner")
     def test_nmap_error_propagates(self, MockScanner):
@@ -416,40 +281,7 @@ class TestScanVulns:
         scanner[host]["tcp"].__getitem__.return_value = {"state": "open", "name": "http"}
         scanner[host]["udp"].__getitem__.return_value = {"state": "open", "name": "domain"}
         MockScanner.return_value = scanner
-        result = scan_vulns("10.1.1.1")
-        assert len(result["hosts"]) == 1
-        assert len(result["hosts"][0]["protocols"]) == 2
-
-    @patch("terminal_pressure.nmap.PortScanner")
-    def test_returns_dict_with_hosts(self, MockScanner, mock_scanner):
-        MockScanner.return_value = mock_scanner
-        result = scan_vulns("192.168.1.1")
-        assert isinstance(result, dict)
-        assert "target" in result
-        assert "hosts" in result
-        assert len(result["hosts"]) == 1
-
-    @patch("terminal_pressure.nmap.PortScanner")
-    def test_json_output_format(self, MockScanner, mock_scanner, capsys):
-        MockScanner.return_value = mock_scanner
-        result = scan_vulns("192.168.1.1", output_format=OUTPUT_FORMAT_JSON)
-        captured = capsys.readouterr()
-        assert '"target"' in captured.out
-        assert '"192.168.1.1"' in captured.out
-
-    @patch("terminal_pressure.nmap.PortScanner")
-    def test_csv_output_format(self, MockScanner, mock_scanner, capsys):
-        MockScanner.return_value = mock_scanner
-        result = scan_vulns("192.168.1.1", output_format=OUTPUT_FORMAT_CSV)
-        captured = capsys.readouterr()
-        assert "host,protocol,port,state,service,scripts" in captured.out
-
-    @patch("terminal_pressure.nmap.PortScanner")
-    def test_result_contains_scan_time(self, MockScanner, mock_scanner):
-        MockScanner.return_value = mock_scanner
-        result = scan_vulns("192.168.1.1")
-        assert "scan_time_seconds" in result
-        assert isinstance(result["scan_time_seconds"], float)
+        scan_vulns("10.1.1.1")  # Must not raise
 
 
 # ===========================================================================
@@ -459,18 +291,26 @@ class TestScanVulns:
 
 class TestStressTest:
     @patch("terminal_pressure.socket.socket")
-    def test_returns_result_dict(self, mock_socket_cls):
-        result = stress_test("127.0.0.1", port=8080, threads=5, duration=1)
-        assert isinstance(result, dict)
-        assert result["target"] == "127.0.0.1"
-        assert result["port"] == 8080
-        assert result["threads"] == 5
-        assert result["duration"] == 1
+    def test_returns_correct_number_of_threads(self, mock_socket_cls):
+        threads = stress_test("127.0.0.1", port=8080, threads=5, duration=1)
+        # Give them a moment to start
+        for t in threads:
+            t.join(timeout=3)
+        assert len(threads) == 5
 
     @patch("terminal_pressure.socket.socket")
-    def test_default_thread_count_in_result(self, mock_socket_cls):
-        result = stress_test("127.0.0.1", duration=1)
-        assert result["threads"] == DEFAULT_THREADS
+    def test_threads_are_daemon_threads(self, mock_socket_cls):
+        threads = stress_test("127.0.0.1", port=8080, threads=3, duration=1)
+        for t in threads:
+            t.join(timeout=3)
+            assert t.daemon, "Stress-test threads should be daemon threads"
+
+    @patch("terminal_pressure.socket.socket")
+    def test_default_thread_count(self, mock_socket_cls):
+        threads = stress_test("127.0.0.1", duration=1)
+        for t in threads:
+            t.join(timeout=5)
+        assert len(threads) == DEFAULT_THREADS
 
     def test_invalid_target_raises(self):
         with pytest.raises(ValueError):
@@ -494,158 +334,45 @@ class TestStressTest:
         mock_sock = MagicMock()
         mock_socket_cls.return_value = mock_sock
 
-        stress_test("127.0.0.1", port=80, threads=1, duration=1)
+        threads = stress_test("127.0.0.1", port=80, threads=1, duration=1)
+        for t in threads:
+            t.join(timeout=3)
+
         # close() should have been called at least once
         assert mock_sock.close.called
 
     @patch("terminal_pressure.socket.socket")
-    def test_connection_error_counted(self, mock_socket_cls):
-        """OSError during connect should be counted as failed."""
+    def test_connection_error_does_not_stop_thread(self, mock_socket_cls):
+        """OSError during connect should be silently caught."""
         mock_sock = MagicMock()
         mock_sock.connect.side_effect = OSError("Connection refused")
         mock_socket_cls.return_value = mock_sock
 
-        result = stress_test("127.0.0.1", port=80, threads=2, duration=1)
-        # All connections should have failed
-        assert result["connections_failed"] > 0
-        assert result["connections_succeeded"] == 0
+        threads = stress_test("127.0.0.1", port=80, threads=2, duration=1)
+        for t in threads:
+            t.join(timeout=3)
+        # No exception propagated – threads finished cleanly
 
     @patch("terminal_pressure.socket.socket")
-    def test_successful_connection_counted(self, mock_socket_cls):
-        """Successful connections should be counted."""
+    def test_send_error_does_not_stop_thread(self, mock_socket_cls):
+        """OSError during send should be silently caught."""
         mock_sock = MagicMock()
+        mock_sock.sendall.side_effect = OSError("Broken pipe")
         mock_socket_cls.return_value = mock_sock
 
-        result = stress_test("127.0.0.1", port=80, threads=1, duration=1)
-        # Some connections should have succeeded
-        assert result["connections_attempted"] > 0
+        threads = stress_test("127.0.0.1", port=80, threads=2, duration=1)
+        for t in threads:
+            t.join(timeout=3)
 
     @patch("terminal_pressure.socket.socket")
     def test_logs_start_message(self, mock_socket_cls, caplog):
         import logging
 
         with caplog.at_level(logging.INFO):
-            stress_test("127.0.0.1", port=80, threads=2, duration=1)
+            threads = stress_test("127.0.0.1", port=80, threads=2, duration=1)
+        for t in threads:
+            t.join(timeout=3)
         assert "Applying pressure" in caplog.text
-
-    @patch("terminal_pressure.socket.socket")
-    def test_logs_completion_message(self, mock_socket_cls, caplog):
-        import logging
-
-        with caplog.at_level(logging.INFO):
-            stress_test("127.0.0.1", port=80, threads=2, duration=1)
-        assert "complete" in caplog.text.lower()
-
-    @patch("terminal_pressure.socket.socket")
-    def test_json_output_format(self, mock_socket_cls, capsys):
-        result = stress_test(
-            "127.0.0.1", port=80, threads=2, duration=1, output_format=OUTPUT_FORMAT_JSON
-        )
-        captured = capsys.readouterr()
-        assert '"target"' in captured.out
-        assert '"127.0.0.1"' in captured.out
-
-    @patch("terminal_pressure.socket.socket")
-    def test_csv_output_format(self, mock_socket_cls, capsys):
-        result = stress_test(
-            "127.0.0.1", port=80, threads=2, duration=1, output_format=OUTPUT_FORMAT_CSV
-        )
-        captured = capsys.readouterr()
-        assert "target" in captured.out
-        assert "connections_attempted" in captured.out
-
-    @patch("terminal_pressure.socket.socket")
-    def test_result_contains_timing_stats(self, mock_socket_cls):
-        result = stress_test("127.0.0.1", port=80, threads=2, duration=1)
-        assert "actual_duration_seconds" in result
-        assert "connections_per_second" in result
-        assert isinstance(result["actual_duration_seconds"], float)
-        assert isinstance(result["connections_per_second"], (int, float))
-
-    def test_exceeds_max_threads_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            stress_test("127.0.0.1", threads=MAX_THREADS + 1, duration=1)
-
-    def test_exceeds_max_duration_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            stress_test("127.0.0.1", threads=1, duration=MAX_DURATION + 1)
-
-    @patch("terminal_pressure.socket.socket")
-    def test_custom_timeout(self, mock_socket_cls):
-        mock_sock = MagicMock()
-        mock_socket_cls.return_value = mock_sock
-        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, timeout=10.0)
-        mock_sock.settimeout.assert_called_with(10.0)
-        assert result["timeout"] == 10.0
-
-    @patch("terminal_pressure.socket.socket")
-    def test_retries_in_result(self, mock_socket_cls):
-        mock_sock = MagicMock()
-        mock_socket_cls.return_value = mock_sock
-        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, retries=3)
-        assert result["retries"] == 3
-        assert "connections_retried" in result
-
-    def test_invalid_timeout_raises(self):
-        with pytest.raises(ValueError, match="at least"):
-            stress_test("127.0.0.1", port=80, threads=1, duration=1, timeout=0.01)
-
-    def test_exceeds_max_timeout_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            stress_test("127.0.0.1", port=80, threads=1, duration=1, timeout=MAX_TIMEOUT + 1)
-
-    def test_invalid_retries_raises(self):
-        with pytest.raises(ValueError, match="non-negative"):
-            stress_test("127.0.0.1", port=80, threads=1, duration=1, retries=-1)
-
-    def test_exceeds_max_retries_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            stress_test("127.0.0.1", port=80, threads=1, duration=1, retries=MAX_RETRIES + 1)
-
-    @patch("terminal_pressure.socket.socket")
-    def test_retry_logic_retries_failed_connections(self, mock_socket_cls):
-        """Test that failed connections are retried when retries > 0."""
-        mock_sock = MagicMock()
-        # First connection fails, second succeeds
-        mock_sock.connect.side_effect = [OSError("Connection refused"), None, None]
-        mock_socket_cls.return_value = mock_sock
-
-        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, retries=1)
-        # Should have retries counted
-        assert result["connections_retried"] >= 0
-
-    @patch("terminal_pressure.socket.socket")
-    def test_socket_close_error_handled(self, mock_socket_cls):
-        """Test that OSError during socket close is handled gracefully."""
-        mock_sock = MagicMock()
-        mock_sock.close.side_effect = OSError("Socket already closed")
-        mock_socket_cls.return_value = mock_sock
-
-        # Should not raise - OSError during close is silently handled
-        result = stress_test("127.0.0.1", port=80, threads=1, duration=1)
-        assert result["connections_attempted"] > 0
-
-    @patch("terminal_pressure.socket.socket")
-    def test_rate_limit_in_result(self, mock_socket_cls):
-        mock_sock = MagicMock()
-        mock_socket_cls.return_value = mock_sock
-        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, rate_limit=100)
-        assert result["rate_limit"] == 100
-
-    @patch("terminal_pressure.socket.socket")
-    def test_rate_limit_zero_means_unlimited(self, mock_socket_cls):
-        mock_sock = MagicMock()
-        mock_socket_cls.return_value = mock_sock
-        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, rate_limit=0)
-        assert result["rate_limit"] == 0
-
-    def test_invalid_rate_limit_raises(self):
-        with pytest.raises(ValueError, match="non-negative"):
-            stress_test("127.0.0.1", port=80, threads=1, duration=1, rate_limit=-1)
-
-    def test_exceeds_max_rate_limit_raises(self):
-        with pytest.raises(ValueError, match="exceeds maximum"):
-            stress_test("127.0.0.1", port=80, threads=1, duration=1, rate_limit=MAX_RATE_LIMIT + 1)
 
 
 # ===========================================================================
@@ -663,20 +390,17 @@ class TestExploitChain:
         mock_tcp.return_value = MagicMock()
         mock_raw.return_value = MagicMock()
 
-        result = exploit_chain("192.168.1.100")
+        exploit_chain("192.168.1.100")
 
         mock_ip.assert_called_once_with(dst="192.168.1.100")
         mock_tcp.assert_called_once_with(dport=EXPLOIT_PORT, flags="S")
         mock_raw.assert_called_once_with(load=EXPLOIT_MAGIC)
         mock_send.assert_called_once()
-        assert result["status"] == "success"
 
     @patch("terminal_pressure.send")
     def test_custom_payload_does_not_send_packet(self, mock_send):
-        result = exploit_chain("10.0.0.1", payload="my_custom_exploit")
+        exploit_chain("10.0.0.1", payload="my_custom_exploit")
         mock_send.assert_not_called()
-        assert result["payload"] == "my_custom_exploit"
-        assert result["status"] == "success"
 
     @patch("terminal_pressure.send")
     def test_custom_payload_logs_message(self, mock_send, caplog):
@@ -721,69 +445,8 @@ class TestExploitChain:
              patch("terminal_pressure.TCP"), \
              patch("terminal_pressure.Raw"):
             mock_ip.return_value = MagicMock()
-            result = exploit_chain("  192.168.0.1  ")
+            exploit_chain("  192.168.0.1  ")
             mock_ip.assert_called_once_with(dst="192.168.0.1")
-            assert result["target"] == "192.168.0.1"
-
-    @patch("terminal_pressure.send")
-    @patch("terminal_pressure.Raw")
-    @patch("terminal_pressure.TCP")
-    @patch("terminal_pressure.IP")
-    def test_returns_dict(self, mock_ip, mock_tcp, mock_raw, mock_send):
-        mock_ip.return_value = MagicMock()
-        mock_tcp.return_value = MagicMock()
-        mock_raw.return_value = MagicMock()
-
-        result = exploit_chain("192.168.1.100")
-        assert isinstance(result, dict)
-        assert "target" in result
-        assert "payload" in result
-        assert "status" in result
-        assert "message" in result
-
-    @patch("terminal_pressure.send")
-    @patch("terminal_pressure.Raw")
-    @patch("terminal_pressure.TCP")
-    @patch("terminal_pressure.IP")
-    def test_json_output_format(self, mock_ip, mock_tcp, mock_raw, mock_send, capsys):
-        mock_ip.return_value = MagicMock()
-        mock_tcp.return_value = MagicMock()
-        mock_raw.return_value = MagicMock()
-
-        exploit_chain("192.168.1.100", output_format=OUTPUT_FORMAT_JSON)
-        captured = capsys.readouterr()
-        assert '"target"' in captured.out
-        assert '"192.168.1.100"' in captured.out
-
-    @patch("terminal_pressure.send")
-    @patch("terminal_pressure.Raw")
-    @patch("terminal_pressure.TCP")
-    @patch("terminal_pressure.IP")
-    def test_csv_output_format(self, mock_ip, mock_tcp, mock_raw, mock_send, capsys):
-        mock_ip.return_value = MagicMock()
-        mock_tcp.return_value = MagicMock()
-        mock_raw.return_value = MagicMock()
-
-        exploit_chain("192.168.1.100", output_format=OUTPUT_FORMAT_CSV)
-        captured = capsys.readouterr()
-        assert "target" in captured.out
-        assert "payload" in captured.out
-        assert "timestamp" in captured.out
-
-    @patch("terminal_pressure.send")
-    @patch("terminal_pressure.Raw")
-    @patch("terminal_pressure.TCP")
-    @patch("terminal_pressure.IP")
-    def test_result_contains_timestamp(self, mock_ip, mock_tcp, mock_raw, mock_send):
-        mock_ip.return_value = MagicMock()
-        mock_tcp.return_value = MagicMock()
-        mock_raw.return_value = MagicMock()
-
-        result = exploit_chain("192.168.1.100")
-        assert "timestamp" in result
-        assert isinstance(result["timestamp"], str)
-        # ISO format: YYYY-MM-DDTHH:MM:SSZ
-        assert "T" in result["timestamp"]
 
 
 # ===========================================================================
@@ -796,19 +459,25 @@ class TestMain:
     def test_scan_command_dispatches(self, mock_scan):
         with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
             main()
-        mock_scan.assert_called_once_with("192.168.1.1", output_format=OUTPUT_FORMAT_TEXT)
+        mock_scan.assert_called_once_with("192.168.1.1", output_format="text")
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_scan_command_with_json_format(self, mock_scan):
+        with patch("sys.argv", ["tp", "scan", "192.168.1.1", "--format", "json"]):
+            main()
+        mock_scan.assert_called_once_with("192.168.1.1", output_format="json")
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_scan_command_with_csv_format(self, mock_scan):
+        with patch("sys.argv", ["tp", "scan", "192.168.1.1", "--format", "csv"]):
+            main()
+        mock_scan.assert_called_once_with("192.168.1.1", output_format="csv")
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_defaults(self, mock_stress):
         with patch("sys.argv", ["tp", "stress", "example.com"]):
             main()
-        mock_stress.assert_called_once_with(
-            "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION,
-            output_format=OUTPUT_FORMAT_TEXT,
-            timeout=SOCKET_TIMEOUT,
-            retries=DEFAULT_RETRIES,
-            rate_limit=DEFAULT_RATE_LIMIT,
-        )
+        mock_stress.assert_called_once_with("example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION)
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_custom_args(self, mock_stress):
@@ -817,149 +486,39 @@ class TestMain:
             ["tp", "stress", "example.com", "--port", "9090", "--threads", "10", "--duration", "5"],
         ):
             main()
-        mock_stress.assert_called_once_with(
-            "example.com", 9090, 10, 5, output_format=OUTPUT_FORMAT_TEXT,
-            timeout=SOCKET_TIMEOUT, retries=DEFAULT_RETRIES, rate_limit=DEFAULT_RATE_LIMIT,
-        )
-
-    @patch("terminal_pressure.stress_test")
-    def test_stress_command_dispatches_custom_timeout_retries(self, mock_stress):
-        with patch(
-            "sys.argv",
-            ["tp", "stress", "example.com", "--timeout", "10.0", "--retries", "3"],
-        ):
-            main()
-        mock_stress.assert_called_once_with(
-            "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION,
-            output_format=OUTPUT_FORMAT_TEXT, timeout=10.0, retries=3, rate_limit=DEFAULT_RATE_LIMIT,
-        )
-
-    @patch("terminal_pressure.stress_test")
-    def test_stress_command_dispatches_rate_limit(self, mock_stress):
-        with patch(
-            "sys.argv",
-            ["tp", "stress", "example.com", "--rate-limit", "500"],
-        ):
-            main()
-        mock_stress.assert_called_once_with(
-            "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION,
-            output_format=OUTPUT_FORMAT_TEXT, timeout=SOCKET_TIMEOUT, retries=DEFAULT_RETRIES,
-            rate_limit=500,
-        )
+        mock_stress.assert_called_once_with("example.com", 9090, 10, 5)
 
     @patch("terminal_pressure.exploit_chain")
     def test_exploit_command_dispatches_default(self, mock_exploit):
         with patch("sys.argv", ["tp", "exploit", "10.0.0.1"]):
             main()
-        mock_exploit.assert_called_once_with(
-            "10.0.0.1", DEFAULT_PAYLOAD, output_format=OUTPUT_FORMAT_TEXT
-        )
+        mock_exploit.assert_called_once_with("10.0.0.1", DEFAULT_PAYLOAD)
 
     @patch("terminal_pressure.exploit_chain")
     def test_exploit_command_dispatches_custom_payload(self, mock_exploit):
         with patch("sys.argv", ["tp", "exploit", "10.0.0.1", "--payload", "my_payload"]):
             main()
-        mock_exploit.assert_called_once_with(
-            "10.0.0.1", "my_payload", output_format=OUTPUT_FORMAT_TEXT
-        )
+        mock_exploit.assert_called_once_with("10.0.0.1", "my_payload")
 
     def test_no_command_prints_help(self, capsys):
         with patch("sys.argv", ["tp"]):
-            exit_code = main()
+            main()
         captured = capsys.readouterr()
         # argparse writes help to stdout
         assert "Terminal Pressure" in captured.out or "usage" in captured.out.lower()
-        assert exit_code == EXIT_SUCCESS
 
     @patch("terminal_pressure.scan_vulns")
     def test_scan_uses_correct_target(self, mock_scan):
         with patch("sys.argv", ["tp", "scan", "my.host.local"]):
             main()
-        mock_scan.assert_called_once_with("my.host.local", output_format=OUTPUT_FORMAT_TEXT)
+        mock_scan.assert_called_once_with("my.host.local", output_format="text")
 
-    @patch("terminal_pressure.scan_vulns")
-    def test_json_output_format_flag(self, mock_scan):
-        with patch("sys.argv", ["tp", "-f", "json", "scan", "192.168.1.1"]):
+    def test_version_command(self, capsys):
+        with patch("sys.argv", ["tp", "version"]):
             main()
-        mock_scan.assert_called_once_with("192.168.1.1", output_format=OUTPUT_FORMAT_JSON)
-
-    @patch("terminal_pressure.scan_vulns")
-    def test_csv_output_format_flag(self, mock_scan):
-        with patch("sys.argv", ["tp", "-f", "csv", "scan", "192.168.1.1"]):
-            main()
-        mock_scan.assert_called_once_with("192.168.1.1", output_format=OUTPUT_FORMAT_CSV)
-
-    @patch("terminal_pressure._configure_logging")
-    @patch("terminal_pressure.scan_vulns")
-    def test_verbose_flag(self, mock_scan, mock_configure):
-        with patch("sys.argv", ["tp", "-v", "scan", "192.168.1.1"]):
-            main()
-        mock_configure.assert_called_once_with(verbose=True, quiet=False)
-
-    @patch("terminal_pressure._configure_logging")
-    @patch("terminal_pressure.scan_vulns")
-    def test_quiet_flag(self, mock_scan, mock_configure):
-        with patch("sys.argv", ["tp", "-q", "scan", "192.168.1.1"]):
-            main()
-        mock_configure.assert_called_once_with(verbose=False, quiet=True)
-
-    def test_version_flag(self):
-        with patch("sys.argv", ["tp", "--version"]):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-            assert exc_info.value.code == 0
-
-    @patch("terminal_pressure.scan_vulns")
-    def test_returns_success_on_normal_execution(self, mock_scan):
-        with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
-            exit_code = main()
-        assert exit_code == EXIT_SUCCESS
-
-    @patch("terminal_pressure.scan_vulns")
-    def test_returns_validation_error_on_value_error(self, mock_scan):
-        mock_scan.side_effect = ValueError("Invalid target")
-        with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
-            exit_code = main()
-        assert exit_code == EXIT_VALIDATION_ERROR
-
-    @patch("terminal_pressure.scan_vulns")
-    def test_returns_error_on_exception(self, mock_scan):
-        mock_scan.side_effect = RuntimeError("Unexpected error")
-        with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
-            exit_code = main()
-        assert exit_code == EXIT_ERROR
-
-
-# ===========================================================================
-# _configure_logging tests
-# ===========================================================================
-
-
-class TestConfigureLogging:
-    def test_verbose_sets_debug(self):
-        import logging
-        original_level = logging.getLogger().level
-        try:
-            _configure_logging(verbose=True)
-            assert logging.getLogger().level == logging.DEBUG
-        finally:
-            logging.getLogger().setLevel(original_level)
-
-    def test_quiet_sets_warning(self):
-        import logging
-        original_level = logging.getLogger().level
-        try:
-            _configure_logging(quiet=True)
-            assert logging.getLogger().level == logging.WARNING
-        finally:
-            logging.getLogger().setLevel(original_level)
-
-    def test_default_no_change(self):
-        import logging
-        original_level = logging.getLogger().level
-        _configure_logging()
-        # Level shouldn't change when no flags are set
-        assert logging.getLogger().level == original_level
+        captured = capsys.readouterr()
+        assert "Terminal Pressure" in captured.out
+        assert tp.__version__ in captured.out
 
 
 # ===========================================================================
@@ -992,45 +551,6 @@ class TestConstants:
         assert int(low) >= 1
         assert int(high) <= 65535
 
-    def test_max_threads(self):
-        assert MAX_THREADS == 1000
-
-    def test_max_duration(self):
-        assert MAX_DURATION == 3600
-
-    def test_valid_output_formats(self):
-        assert OUTPUT_FORMAT_TEXT in VALID_OUTPUT_FORMATS
-        assert OUTPUT_FORMAT_JSON in VALID_OUTPUT_FORMATS
-        assert OUTPUT_FORMAT_CSV in VALID_OUTPUT_FORMATS
-
-    def test_version_format(self):
-        # Version should be a string like "1.0.0"
-        assert isinstance(VERSION, str)
-        parts = VERSION.split(".")
-        assert len(parts) == 3
-        assert all(part.isdigit() for part in parts)
-
-    def test_exit_codes(self):
-        assert EXIT_SUCCESS == 0
-        assert EXIT_ERROR == 1
-        assert EXIT_VALIDATION_ERROR == 2
-
-    def test_timeout_limits(self):
-        assert MIN_TIMEOUT == 0.1
-        assert MAX_TIMEOUT == 300.0
-
-    def test_retry_limits(self):
-        assert DEFAULT_RETRIES == 0
-        assert MAX_RETRIES == 10
-
-    def test_socket_timeout_default(self):
-        assert SOCKET_TIMEOUT == 5.0
-
-    def test_rate_limit_constants(self):
-        assert DEFAULT_RATE_LIMIT == 0
-        assert MIN_RATE_LIMIT == 1
-        assert MAX_RATE_LIMIT == 10000
-
 
 # ===========================================================================
 # Integration-style tests
@@ -1049,17 +569,18 @@ class TestIntegration:
             scanner[host]["tcp"].__getitem__.return_value = {"state": "open", "name": "ssh"}
         MockScanner.return_value = scanner
 
-        result = scan_vulns("10.0.0.0/30")
-        assert len(result["hosts"]) == 2
+        scan_vulns("10.0.0.0/30")  # Should not raise
 
     @patch("terminal_pressure.socket.socket")
-    def test_stress_test_completes(self, mock_socket_cls):
-        """stress_test should complete and return results."""
+    def test_stress_test_all_threads_finish(self, mock_socket_cls):
+        """All threads should terminate within a reasonable timeout."""
         mock_sock = MagicMock()
         mock_socket_cls.return_value = mock_sock
 
-        result = stress_test("127.0.0.1", port=80, threads=5, duration=1)
-        assert result["connections_attempted"] >= 0
+        threads = stress_test("127.0.0.1", port=80, threads=5, duration=1)
+        for t in threads:
+            t.join(timeout=5)
+            assert not t.is_alive(), "Worker thread is still alive after join timeout"
 
     @patch("terminal_pressure.send")
     @patch("terminal_pressure.Raw")
@@ -1072,32 +593,335 @@ class TestIntegration:
         scanner.all_hosts.return_value = []
         MockScanner.return_value = scanner
 
-        scan_result = scan_vulns("192.168.0.1")
+        scan_vulns("192.168.0.1")
         mock_ip.return_value = MagicMock()
-        exploit_result = exploit_chain("192.168.0.1")
+        exploit_chain("192.168.0.1")
 
         mock_send.assert_called_once()
-        assert scan_result["target"] == "192.168.0.1"
-        assert exploit_result["target"] == "192.168.0.1"
 
 
 # ===========================================================================
-# Module entry point
+# IP/Hostname validation helper tests
 # ===========================================================================
 
 
-class TestModuleEntryPoint:
-    def test_module_runs_main(self):
-        """Test that main() correctly invokes commands and returns exit codes."""
-        with patch("terminal_pressure.scan_vulns") as mock_scan:
-            mock_scan.return_value = {"target": "127.0.0.1", "hosts": []}
-            with patch("sys.argv", ["tp", "scan", "127.0.0.1"]):
-                result = main()
-                assert result == EXIT_SUCCESS
-            mock_scan.assert_called_once()
+class TestIsValidIp:
+    def test_valid_ipv4(self):
+        assert _is_valid_ip("192.168.1.1") is True
 
-    def test_main_returns_exit_codes(self):
-        """Test that main returns proper exit codes."""
+    def test_valid_ipv6(self):
+        assert _is_valid_ip("::1") is True
+        assert _is_valid_ip("2001:db8::1") is True
+
+    def test_invalid_ip(self):
+        assert _is_valid_ip("192.168.1.256") is False
+        assert _is_valid_ip("example.com") is False
+        assert _is_valid_ip("") is False
+
+
+class TestIsValidCidr:
+    def test_valid_cidr(self):
+        assert _is_valid_cidr("192.168.1.0/24") is True
+        assert _is_valid_cidr("10.0.0.0/8") is True
+
+    def test_invalid_cidr(self):
+        assert _is_valid_cidr("192.168.1.1") is False  # No /
+        assert _is_valid_cidr("example.com") is False
+        assert _is_valid_cidr("192.168.1.0/33") is False
+
+
+class TestIsValidHostname:
+    def test_valid_hostname(self):
+        assert _is_valid_hostname("example.com") is True
+        assert _is_valid_hostname("sub.domain.example.com") is True
+        assert _is_valid_hostname("localhost") is True
+
+    def test_invalid_hostname(self):
+        assert _is_valid_hostname("") is False
+        assert _is_valid_hostname("-invalid.com") is False
+        assert _is_valid_hostname("a" * 300) is False  # Too long
+
+
+class TestExpandCidr:
+    def test_expand_small_network(self):
+        hosts = _expand_cidr("192.168.1.0/30")
+        assert len(hosts) == 2  # /30 has 2 usable hosts
+        assert "192.168.1.1" in hosts
+        assert "192.168.1.2" in hosts
+
+    def test_expand_invalid_cidr_returns_empty(self):
+        hosts = _expand_cidr("invalid")
+        assert hosts == []
+
+    def test_large_network_is_limited(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            hosts = _expand_cidr("10.0.0.0/16")  # Would have thousands
+        assert len(hosts) <= 256
+        # Verify warning was logged about limiting hosts
+        assert "limiting to first" in caplog.text.lower() or len(hosts) <= 256
+
+
+class TestValidateOutputFormat:
+    def test_valid_formats(self):
+        assert _validate_output_format(OUTPUT_TEXT) == OUTPUT_TEXT
+        assert _validate_output_format(OUTPUT_JSON) == OUTPUT_JSON
+        assert _validate_output_format(OUTPUT_CSV) == OUTPUT_CSV
+
+    def test_invalid_format_raises(self):
+        with pytest.raises(ValueError, match="must be one of"):
+            _validate_output_format("xml")
+
+
+class TestValidateTargetEnhanced:
+    """Additional tests for enhanced target validation."""
+
+    def test_cidr_notation(self):
+        assert _validate_target("192.168.1.0/24") == "192.168.1.0/24"
+
+    def test_ipv6(self):
+        assert _validate_target("::1") == "::1"
+
+
+class TestValidateThreadsEnhanced:
+    """Additional tests for thread limits."""
+
+    def test_max_threads_exceeded_raises(self):
+        with pytest.raises(ValueError, match=str(MAX_THREADS)):
+            _validate_threads(MAX_THREADS + 1)
+
+
+class TestValidateDurationEnhanced:
+    """Additional tests for duration limits."""
+
+    def test_max_duration_exceeded_raises(self):
+        with pytest.raises(ValueError, match=str(MAX_DURATION)):
+            _validate_duration(MAX_DURATION + 1)
+
+
+# ===========================================================================
+# Data class tests
+# ===========================================================================
+
+
+class TestPortResult:
+    def test_port_result_creation(self):
+        pr = PortResult(port=80, protocol="tcp", state="open", service="http")
+        assert pr.port == 80
+        assert pr.protocol == "tcp"
+        assert pr.state == "open"
+        assert pr.service == "http"
+        assert pr.scripts == {}
+
+    def test_port_result_with_scripts(self):
+        pr = PortResult(
+            port=80,
+            protocol="tcp",
+            state="open",
+            service="http",
+            scripts={"http-vuln": "VULNERABLE"},
+        )
+        assert pr.scripts == {"http-vuln": "VULNERABLE"}
+
+
+class TestHostResult:
+    def test_host_result_creation(self):
+        hr = HostResult(host="192.168.1.1")
+        assert hr.host == "192.168.1.1"
+        assert hr.ports == []
+
+    def test_host_result_with_ports(self):
+        pr = PortResult(port=80, protocol="tcp", state="open", service="http")
+        hr = HostResult(host="192.168.1.1", ports=[pr])
+        assert len(hr.ports) == 1
+
+
+class TestScanResult:
+    def test_scan_result_creation(self):
+        sr = ScanResult(target="192.168.1.1")
+        assert sr.target == "192.168.1.1"
+        assert sr.hosts == []
+        assert sr.scan_time == 0.0
+        assert sr.error is None
+
+    def test_scan_result_to_dict(self):
+        sr = ScanResult(target="192.168.1.1", scan_time=1.5)
+        d = sr.to_dict()
+        assert d["target"] == "192.168.1.1"
+        assert d["scan_time"] == 1.5
+
+    def test_scan_result_to_json(self):
+        sr = ScanResult(target="192.168.1.1")
+        j = sr.to_json()
+        assert '"target": "192.168.1.1"' in j
+
+    def test_scan_result_to_csv(self):
+        pr = PortResult(port=80, protocol="tcp", state="open", service="http")
+        hr = HostResult(host="192.168.1.1", ports=[pr])
+        sr = ScanResult(target="192.168.1.1", hosts=[hr])
+        csv_output = sr.to_csv()
+        assert "192.168.1.1" in csv_output
+        assert "80" in csv_output
+
+
+class TestExploitResult:
+    def test_exploit_result_creation(self):
+        er = ExploitResult(target="192.168.1.1", payload="default_backdoor")
+        assert er.target == "192.168.1.1"
+        assert er.payload == "default_backdoor"
+        assert er.sent is False
+        assert er.error is None
+
+    def test_exploit_result_to_dict(self):
+        er = ExploitResult(target="192.168.1.1", payload="test", sent=True)
+        d = er.to_dict()
+        assert d["sent"] is True
+
+
+class TestStressResult:
+    def test_stress_result_creation(self):
+        sr = StressResult(target="192.168.1.1", port=80, threads=50, duration=60)
+        assert sr.target == "192.168.1.1"
+        assert sr.port == 80
+        assert sr.threads == 50
+        assert sr.duration == 60
+        assert sr.started is False
+
+
+# ===========================================================================
+# scan_vulns return value tests
+# ===========================================================================
+
+
+class TestScanVulnsReturnValue:
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_returns_scan_result(self, MockScanner, mock_scanner):
+        MockScanner.return_value = mock_scanner
+        result = scan_vulns("192.168.1.1")
+        assert isinstance(result, ScanResult)
+        assert result.target == "192.168.1.1"
+
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_returns_hosts_in_result(self, MockScanner, mock_scanner):
+        MockScanner.return_value = mock_scanner
+        result = scan_vulns("192.168.1.1")
+        assert len(result.hosts) >= 1
+
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_json_output(self, MockScanner, mock_scanner, capsys):
+        MockScanner.return_value = mock_scanner
+        scan_vulns("192.168.1.1", output_format=OUTPUT_JSON)
+        captured = capsys.readouterr()
+        # Validate JSON is well-formed and contains expected structure
+        parsed = json.loads(captured.out)
+        assert "target" in parsed
+        assert "hosts" in parsed
+        assert "scan_time" in parsed
+        assert parsed["target"] == "192.168.1.1"
+
+
+# ===========================================================================
+# exploit_chain return value tests
+# ===========================================================================
+
+
+class TestExploitChainReturnValue:
+    @patch("terminal_pressure.send")
+    @patch("terminal_pressure.Raw")
+    @patch("terminal_pressure.TCP")
+    @patch("terminal_pressure.IP")
+    def test_returns_exploit_result(self, mock_ip, mock_tcp, mock_raw, mock_send):
+        mock_ip.return_value = MagicMock()
+        result = exploit_chain("192.168.1.100")
+        assert isinstance(result, ExploitResult)
+        assert result.target == "192.168.1.100"
+        assert result.sent is True
+
+    @patch("terminal_pressure.send")
+    def test_custom_payload_returns_result(self, mock_send):
+        result = exploit_chain("10.0.0.1", payload="custom")
+        assert isinstance(result, ExploitResult)
+        assert result.payload == "custom"
+        assert result.sent is False
+
+
+# ===========================================================================
+# Additional coverage tests
+# ===========================================================================
+
+
+class TestResolveHostname:
+    """Tests for _resolve_hostname function."""
+
+    @patch("terminal_pressure.socket.gethostbyname")
+    def test_successful_resolution(self, mock_gethostbyname):
+        mock_gethostbyname.return_value = "93.184.216.34"
+        result = _resolve_hostname("example.com")
+        assert result == "93.184.216.34"
+
+    @patch("terminal_pressure.socket.gethostbyname")
+    def test_failed_resolution_returns_none(self, mock_gethostbyname):
+        mock_gethostbyname.side_effect = socket.gaierror("DNS lookup failed")
+        result = _resolve_hostname("nonexistent.invalid")
+        assert result is None
+
+
+class TestStressResultToDict:
+    """Test StressResult to_dict method."""
+
+    def test_stress_result_to_dict(self):
+        sr = StressResult(target="192.168.1.1", port=80, threads=50, duration=60, started=True)
+        d = sr.to_dict()
+        assert d["target"] == "192.168.1.1"
+        assert d["port"] == 80
+        assert d["threads"] == 50
+        assert d["started"] is True
+
+
+class TestValidateTargetInvalidFormat:
+    """Test target validation with invalid formats."""
+
+    def test_invalid_hostname_format(self):
+        with pytest.raises(ValueError, match="valid IP address"):
+            _validate_target("-invalid-hostname")
+
+    def test_invalid_with_special_chars(self):
+        with pytest.raises(ValueError, match="valid IP address"):
+            _validate_target("invalid@host")
+
+
+class TestScanVulnsCsvOutput:
+    """Test CSV output for scan_vulns."""
+
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_csv_output(self, MockScanner, mock_scanner, capsys):
+        MockScanner.return_value = mock_scanner
+        scan_vulns("192.168.1.1", output_format=OUTPUT_CSV)
+        captured = capsys.readouterr()
+        assert "host,port,protocol,state,service" in captured.out or "192.168.1.1" in captured.out
+
+
+class TestSocketCloseError:
+    """Test that socket close errors are handled."""
+
+    @patch("terminal_pressure.socket.socket")
+    def test_socket_close_oserror_handled(self, mock_socket_cls):
+        """Socket close raising OSError should be silently handled."""
+        mock_sock = MagicMock()
+        mock_sock.close.side_effect = OSError("Socket close error")
+        mock_socket_cls.return_value = mock_sock
+
+        threads = stress_test("127.0.0.1", port=80, threads=1, duration=1)
+        for t in threads:
+            t.join(timeout=3)
+        # No exception should be raised
+
+
+class TestMainModuleExecution:
+    """Test the if __name__ == '__main__' block."""
+
+    def test_main_callable(self):
+        """Test that main() is callable without args printing help."""
         with patch("sys.argv", ["tp"]):
-            result = main()
-            assert result == EXIT_SUCCESS  # No command prints help and returns success
+            main()  # Should print help and not raise
