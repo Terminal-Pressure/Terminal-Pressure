@@ -7,8 +7,40 @@ on:
     branches: [ main ]
   schedule:
     - cron: '0 0 * * 0'  # Weekly on Sunday
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  osv-scanner:
+    name: OSV Scanner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
+    - name: Run OSV Scanner
+      uses: google/osv-scanner-action/osv-scanner-action@c51854704019a247608d928f370c98740469d4b5  # v2.3.5
+      with:
+        scan-args: |-
+          --recursive
+          --format sarif
+          --output results.sarif
+          ./
+      continue-on-error: true
+
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@df409f7d9260372bd5f19e5b04e83cb3c43714ae  # v3
+      if: always()
+      with:
+        sarif_file: results.sarif
+
   dependency-audit:
     name: Python dependency audit
     runs-on: ubuntu-latest
@@ -17,10 +49,10 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
       with:
         python-version: '3.12'
 
@@ -44,12 +76,107 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@df409f7d9260372bd5f19e5b04e83cb3c43714ae  # v3
       with:
         languages: python
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
+      uses: github/codeql-action/analyze@df409f7d9260372bd5f19e5b04e83cb3c43714ae  # v3
+
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
+    - name: Set up Python
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Install and Run Semgrep
+      run: |
+        python -m pip install semgrep==1.95.0
+        semgrep ci --config auto
+      continue-on-error: true
+
+  checkov:
+    name: Checkov IaC audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
+    - name: Run Checkov
+      uses: bridgecrewio/checkov-action@20fb358293b0af0188f25cf7658b69d49ec12c9a  # v12.3100.0
+      with:
+        directory: .
+        framework: all
+        soft_fail: true
+
+  bandit:
+    name: Bandit Security Linter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
+    - name: Set up Python
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Bandit
+      run: pip install bandit[toml]
+
+    - name: Run Bandit
+      run: |
+        bandit -r . -f json -o bandit-report.json || true
+        bandit -r . -f screen
+      continue-on-error: true
+
+    - name: Upload Bandit results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+      if: always()
+      with:
+        name: bandit-report
+        path: bandit-report.json
+
+  trivy:
+    name: Trivy Security Scanner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
+    - name: Run Trivy vulnerability scanner in fs mode
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+      continue-on-error: true
+
+    - name: Upload Trivy results to GitHub Security
+      uses: github/codeql-action/upload-sarif@df409f7d9260372bd5f19e5b04e83cb3c43714ae  # v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
