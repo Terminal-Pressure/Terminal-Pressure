@@ -17,6 +17,8 @@ Environment Variables:
 """
 
 import argparse
+import csv
+import io
 import json
 import logging
 import os
@@ -50,7 +52,13 @@ MAX_DURATION: int = 3600  # 1 hour max
 # Output format options
 OUTPUT_FORMAT_TEXT: str = "text"
 OUTPUT_FORMAT_JSON: str = "json"
-VALID_OUTPUT_FORMATS: tuple[str, ...] = (OUTPUT_FORMAT_TEXT, OUTPUT_FORMAT_JSON)
+OUTPUT_FORMAT_CSV: str = "csv"
+VALID_OUTPUT_FORMATS: tuple[str, ...] = (OUTPUT_FORMAT_TEXT, OUTPUT_FORMAT_JSON, OUTPUT_FORMAT_CSV)
+
+# Exit codes
+EXIT_SUCCESS: int = 0
+EXIT_ERROR: int = 1
+EXIT_VALIDATION_ERROR: int = 2
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -180,12 +188,13 @@ def scan_vulns(target: str, output_format: str = OUTPUT_FORMAT_TEXT) -> dict[str
 
     Args:
         target: IP address or hostname of the scan target.
-        output_format: Output format ('text' or 'json'). Default: 'text'.
+        output_format: Output format ('text', 'json', or 'csv'). Default: 'text'.
 
     Returns:
         A dictionary containing scan results with keys:
         - 'target': The scanned target
         - 'hosts': List of discovered hosts with port/vuln info
+        - 'scan_time_seconds': Duration of the scan
 
     Raises:
         ValueError: If *target* fails basic validation.
@@ -200,6 +209,8 @@ def scan_vulns(target: str, output_format: str = OUTPUT_FORMAT_TEXT) -> dict[str
     output_format = _validate_output_format(output_format)
     logger.info("Starting vulnerability scan on target: %s", target)
 
+    start_time = time.time()
+
     try:
         scanner = nmap.PortScanner()
         scanner.scan(target, PORT_SCAN_RANGE, "-sV --script vuln")
@@ -210,13 +221,13 @@ def scan_vulns(target: str, output_format: str = OUTPUT_FORMAT_TEXT) -> dict[str
         logger.error("Unexpected error during nmap scan: %s", exc)
         raise
 
-    result: dict[str, Any] = {"target": target, "hosts": []}
+    scan_time = time.time() - start_time
+    result: dict[str, Any] = {"target": target, "hosts": [], "scan_time_seconds": round(scan_time, 2)}
     hosts = scanner.all_hosts()
 
     if not hosts:
         logger.info("No hosts found for target: %s", target)
-        if output_format == OUTPUT_FORMAT_JSON:
-            print(json.dumps(result, indent=2))
+        _output_scan_result(result, output_format)
         return result
 
     for host in hosts:
@@ -252,10 +263,40 @@ def scan_vulns(target: str, output_format: str = OUTPUT_FORMAT_TEXT) -> dict[str
             host_data["protocols"].append(proto_data)
         result["hosts"].append(host_data)
 
+    _output_scan_result(result, output_format)
+    return result
+
+
+def _output_scan_result(result: dict[str, Any], output_format: str) -> None:
+    """Output scan results in the specified format.
+
+    Args:
+        result: The scan result dictionary.
+        output_format: Output format ('text', 'json', or 'csv').
+    """
     if output_format == OUTPUT_FORMAT_JSON:
         print(json.dumps(result, indent=2))
-
-    return result
+    elif output_format == OUTPUT_FORMAT_CSV:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["host", "protocol", "port", "state", "service", "scripts"])
+        for host_data in result.get("hosts", []):
+            host = host_data.get("host", "")
+            for proto_data in host_data.get("protocols", []):
+                proto = proto_data.get("protocol", "")
+                for port_data in proto_data.get("ports", []):
+                    scripts_str = ";".join(
+                        f"{k}={v}" for k, v in port_data.get("scripts", {}).items()
+                    )
+                    writer.writerow([
+                        host,
+                        proto,
+                        port_data.get("port", ""),
+                        port_data.get("state", ""),
+                        port_data.get("service", ""),
+                        scripts_str,
+                    ])
+        print(output.getvalue().strip())
 
 
 def stress_test(
@@ -280,7 +321,7 @@ def stress_test(
         port: TCP port to connect to (default: 80).
         threads: Number of concurrent worker threads (default: 50, max: 1000).
         duration: How long (in seconds) each worker thread floods (default: 60, max: 3600).
-        output_format: Output format ('text' or 'json'). Default: 'text'.
+        output_format: Output format ('text', 'json', or 'csv'). Default: 'text'.
 
     Returns:
         A dictionary containing stress test results with keys:
@@ -288,9 +329,11 @@ def stress_test(
         - 'port': The target port
         - 'threads': Number of threads used
         - 'duration': Duration in seconds
+        - 'actual_duration_seconds': Actual elapsed time
         - 'connections_attempted': Total connection attempts
         - 'connections_succeeded': Successful connections
         - 'connections_failed': Failed connections
+        - 'connections_per_second': Average connections per second
 
     Raises:
         ValueError: If any argument fails basic validation.
@@ -308,6 +351,8 @@ def stress_test(
     logger.info(
         "Applying pressure to %s:%d with %d threads for %ds", target, port, threads, duration
     )
+
+    start_time = time.time()
 
     # Thread-safe counters
     stats_lock = threading.Lock()
@@ -348,27 +393,50 @@ def stress_test(
     for t in started:
         t.join()
 
+    actual_duration = time.time() - start_time
+    connections_per_second = (
+        round(stats["attempted"] / actual_duration, 2) if actual_duration > 0 else 0
+    )
+
     result: dict[str, Any] = {
         "target": target,
         "port": port,
         "threads": threads,
         "duration": duration,
+        "actual_duration_seconds": round(actual_duration, 2),
         "connections_attempted": stats["attempted"],
         "connections_succeeded": stats["succeeded"],
         "connections_failed": stats["failed"],
+        "connections_per_second": connections_per_second,
     }
 
+    _output_stress_result(result, output_format)
+    return result
+
+
+def _output_stress_result(result: dict[str, Any], output_format: str) -> None:
+    """Output stress test results in the specified format.
+
+    Args:
+        result: The stress test result dictionary.
+        output_format: Output format ('text', 'json', or 'csv').
+    """
     if output_format == OUTPUT_FORMAT_JSON:
         print(json.dumps(result, indent=2))
+    elif output_format == OUTPUT_FORMAT_CSV:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(result.keys())
+        writer.writerow(result.values())
+        print(output.getvalue().strip())
     else:
         logger.info(
-            "Stress test complete: %d attempts, %d succeeded, %d failed",
-            stats["attempted"],
-            stats["succeeded"],
-            stats["failed"],
+            "Stress test complete: %d attempts, %d succeeded, %d failed (%.2f conn/s)",
+            result["connections_attempted"],
+            result["connections_succeeded"],
+            result["connections_failed"],
+            result["connections_per_second"],
         )
-
-    return result
 
 
 def exploit_chain(
@@ -390,7 +458,7 @@ def exploit_chain(
     Args:
         target: IP address or hostname of the target.
         payload: Payload identifier (default: ``"default_backdoor"``).
-        output_format: Output format ('text' or 'json'). Default: 'text'.
+        output_format: Output format ('text', 'json', or 'csv'). Default: 'text'.
 
     Returns:
         A dictionary containing exploit results with keys:
@@ -398,6 +466,7 @@ def exploit_chain(
         - 'payload': The payload identifier
         - 'status': 'success' or 'error'
         - 'message': Status message
+        - 'timestamp': ISO timestamp of execution
 
     Raises:
         ValueError: If *target* fails basic validation.
@@ -409,11 +478,13 @@ def exploit_chain(
     target = _validate_target(target)
     output_format = _validate_output_format(output_format)
 
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     result: dict[str, Any] = {
         "target": target,
         "payload": payload,
         "status": "success",
         "message": "",
+        "timestamp": timestamp,
     }
 
     if payload == DEFAULT_PAYLOAD:
@@ -431,10 +502,25 @@ def exploit_chain(
         logger.info("Custom exploit chain: %s on %s", payload, target)
         result["message"] = f"Custom exploit chain '{payload}' executed on {target}"
 
+    _output_exploit_result(result, output_format)
+    return result
+
+
+def _output_exploit_result(result: dict[str, Any], output_format: str) -> None:
+    """Output exploit results in the specified format.
+
+    Args:
+        result: The exploit result dictionary.
+        output_format: Output format ('text', 'json', or 'csv').
+    """
     if output_format == OUTPUT_FORMAT_JSON:
         print(json.dumps(result, indent=2))
-
-    return result
+    elif output_format == OUTPUT_FORMAT_CSV:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(result.keys())
+        writer.writerow(result.values())
+        print(output.getvalue().strip())
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +540,7 @@ def _configure_logging(verbose: bool = False, quiet: bool = False) -> None:
         logging.getLogger().setLevel(logging.WARNING)
 
 
-def main() -> None:
+def main() -> int:
     """Parse CLI arguments and dispatch to the appropriate function.
 
     Sub-commands:
@@ -465,7 +551,10 @@ def main() -> None:
     Global flags:
         --verbose, -v : Enable debug logging.
         --quiet, -q   : Suppress info messages, only show warnings/errors.
-        --output-format, -f : Output format ('text' or 'json').
+        --output-format, -f : Output format ('text', 'json', or 'csv').
+
+    Returns:
+        Exit code (0 for success, 1 for error, 2 for validation error).
 
     If no sub-command is provided, the help text is printed.
     """
@@ -531,21 +620,31 @@ def main() -> None:
     # Configure logging based on flags
     _configure_logging(verbose=args.verbose, quiet=args.quiet)
 
-    if args.command == "scan":
-        scan_vulns(args.target, output_format=args.output_format)
-    elif args.command == "stress":
-        stress_test(
-            args.target,
-            args.port,
-            args.threads,
-            args.duration,
-            output_format=args.output_format,
-        )
-    elif args.command == "exploit":
-        exploit_chain(args.target, args.payload, output_format=args.output_format)
-    else:
-        parser.print_help()
+    try:
+        if args.command == "scan":
+            scan_vulns(args.target, output_format=args.output_format)
+        elif args.command == "stress":
+            stress_test(
+                args.target,
+                args.port,
+                args.threads,
+                args.duration,
+                output_format=args.output_format,
+            )
+        elif args.command == "exploit":
+            exploit_chain(args.target, args.payload, output_format=args.output_format)
+        else:
+            parser.print_help()
+            return EXIT_SUCCESS
+    except ValueError as exc:
+        logger.error("Validation error: %s", exc)
+        return EXIT_VALIDATION_ERROR
+    except Exception as exc:
+        logger.error("Error: %s", exc)
+        return EXIT_ERROR
+
+    return EXIT_SUCCESS
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

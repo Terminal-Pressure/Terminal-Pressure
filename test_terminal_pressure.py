@@ -28,16 +28,23 @@ from terminal_pressure import (
     DEFAULT_PAYLOAD,
     DEFAULT_PORT,
     DEFAULT_THREADS,
+    EXIT_ERROR,
+    EXIT_SUCCESS,
+    EXIT_VALIDATION_ERROR,
     EXPLOIT_MAGIC,
     EXPLOIT_PORT,
     MAX_DURATION,
     MAX_THREADS,
+    OUTPUT_FORMAT_CSV,
     OUTPUT_FORMAT_JSON,
     OUTPUT_FORMAT_TEXT,
     PORT_SCAN_RANGE,
     VALID_OUTPUT_FORMATS,
     VERSION,
     _configure_logging,
+    _output_exploit_result,
+    _output_scan_result,
+    _output_stress_result,
     _validate_duration,
     _validate_output_format,
     _validate_port,
@@ -206,6 +213,9 @@ class TestValidateOutputFormat:
         with pytest.raises(ValueError):
             _validate_output_format("")
 
+    def test_csv_format_valid(self):
+        assert _validate_output_format(OUTPUT_FORMAT_CSV) == OUTPUT_FORMAT_CSV
+
 
 # ===========================================================================
 # scan_vulns()
@@ -322,6 +332,20 @@ class TestScanVulns:
         assert '"target"' in captured.out
         assert '"192.168.1.1"' in captured.out
 
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_csv_output_format(self, MockScanner, mock_scanner, capsys):
+        MockScanner.return_value = mock_scanner
+        result = scan_vulns("192.168.1.1", output_format=OUTPUT_FORMAT_CSV)
+        captured = capsys.readouterr()
+        assert "host,protocol,port,state,service,scripts" in captured.out
+
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_result_contains_scan_time(self, MockScanner, mock_scanner):
+        MockScanner.return_value = mock_scanner
+        result = scan_vulns("192.168.1.1")
+        assert "scan_time_seconds" in result
+        assert isinstance(result["scan_time_seconds"], float)
+
 
 # ===========================================================================
 # stress_test()
@@ -415,6 +439,23 @@ class TestStressTest:
         captured = capsys.readouterr()
         assert '"target"' in captured.out
         assert '"127.0.0.1"' in captured.out
+
+    @patch("terminal_pressure.socket.socket")
+    def test_csv_output_format(self, mock_socket_cls, capsys):
+        result = stress_test(
+            "127.0.0.1", port=80, threads=2, duration=1, output_format=OUTPUT_FORMAT_CSV
+        )
+        captured = capsys.readouterr()
+        assert "target" in captured.out
+        assert "connections_attempted" in captured.out
+
+    @patch("terminal_pressure.socket.socket")
+    def test_result_contains_timing_stats(self, mock_socket_cls):
+        result = stress_test("127.0.0.1", port=80, threads=2, duration=1)
+        assert "actual_duration_seconds" in result
+        assert "connections_per_second" in result
+        assert isinstance(result["actual_duration_seconds"], float)
+        assert isinstance(result["connections_per_second"], (int, float))
 
     def test_exceeds_max_threads_raises(self):
         with pytest.raises(ValueError, match="exceeds maximum"):
@@ -532,6 +573,36 @@ class TestExploitChain:
         assert '"target"' in captured.out
         assert '"192.168.1.100"' in captured.out
 
+    @patch("terminal_pressure.send")
+    @patch("terminal_pressure.Raw")
+    @patch("terminal_pressure.TCP")
+    @patch("terminal_pressure.IP")
+    def test_csv_output_format(self, mock_ip, mock_tcp, mock_raw, mock_send, capsys):
+        mock_ip.return_value = MagicMock()
+        mock_tcp.return_value = MagicMock()
+        mock_raw.return_value = MagicMock()
+
+        exploit_chain("192.168.1.100", output_format=OUTPUT_FORMAT_CSV)
+        captured = capsys.readouterr()
+        assert "target" in captured.out
+        assert "payload" in captured.out
+        assert "timestamp" in captured.out
+
+    @patch("terminal_pressure.send")
+    @patch("terminal_pressure.Raw")
+    @patch("terminal_pressure.TCP")
+    @patch("terminal_pressure.IP")
+    def test_result_contains_timestamp(self, mock_ip, mock_tcp, mock_raw, mock_send):
+        mock_ip.return_value = MagicMock()
+        mock_tcp.return_value = MagicMock()
+        mock_raw.return_value = MagicMock()
+
+        result = exploit_chain("192.168.1.100")
+        assert "timestamp" in result
+        assert isinstance(result["timestamp"], str)
+        # ISO format: YYYY-MM-DDTHH:MM:SSZ
+        assert "T" in result["timestamp"]
+
 
 # ===========================================================================
 # main() – CLI dispatch
@@ -583,10 +654,11 @@ class TestMain:
 
     def test_no_command_prints_help(self, capsys):
         with patch("sys.argv", ["tp"]):
-            main()
+            exit_code = main()
         captured = capsys.readouterr()
         # argparse writes help to stdout
         assert "Terminal Pressure" in captured.out or "usage" in captured.out.lower()
+        assert exit_code == EXIT_SUCCESS
 
     @patch("terminal_pressure.scan_vulns")
     def test_scan_uses_correct_target(self, mock_scan):
@@ -599,6 +671,12 @@ class TestMain:
         with patch("sys.argv", ["tp", "-f", "json", "scan", "192.168.1.1"]):
             main()
         mock_scan.assert_called_once_with("192.168.1.1", output_format=OUTPUT_FORMAT_JSON)
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_csv_output_format_flag(self, mock_scan):
+        with patch("sys.argv", ["tp", "-f", "csv", "scan", "192.168.1.1"]):
+            main()
+        mock_scan.assert_called_once_with("192.168.1.1", output_format=OUTPUT_FORMAT_CSV)
 
     @patch("terminal_pressure._configure_logging")
     @patch("terminal_pressure.scan_vulns")
@@ -619,6 +697,26 @@ class TestMain:
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 0
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_returns_success_on_normal_execution(self, mock_scan):
+        with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
+            exit_code = main()
+        assert exit_code == EXIT_SUCCESS
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_returns_validation_error_on_value_error(self, mock_scan):
+        mock_scan.side_effect = ValueError("Invalid target")
+        with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
+            exit_code = main()
+        assert exit_code == EXIT_VALIDATION_ERROR
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_returns_error_on_exception(self, mock_scan):
+        mock_scan.side_effect = RuntimeError("Unexpected error")
+        with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
+            exit_code = main()
+        assert exit_code == EXIT_ERROR
 
 
 # ===========================================================================
@@ -692,6 +790,7 @@ class TestConstants:
     def test_valid_output_formats(self):
         assert OUTPUT_FORMAT_TEXT in VALID_OUTPUT_FORMATS
         assert OUTPUT_FORMAT_JSON in VALID_OUTPUT_FORMATS
+        assert OUTPUT_FORMAT_CSV in VALID_OUTPUT_FORMATS
 
     def test_version_format(self):
         # Version should be a string like "1.0.0"
@@ -699,6 +798,11 @@ class TestConstants:
         parts = VERSION.split(".")
         assert len(parts) == 3
         assert all(part.isdigit() for part in parts)
+
+    def test_exit_codes(self):
+        assert EXIT_SUCCESS == 0
+        assert EXIT_ERROR == 1
+        assert EXIT_VALIDATION_ERROR == 2
 
 
 # ===========================================================================
