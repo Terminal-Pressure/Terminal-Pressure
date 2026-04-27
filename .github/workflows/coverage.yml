@@ -14,9 +14,11 @@ concurrency:
 jobs:
   coverage:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
-        python-version: ['3.10']
+        python-version: ['3.10', '3.11', '3.12']
 
     steps:
     - name: Checkout repository
@@ -38,33 +40,14 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest pytest-cov
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install -r requirements.txt
 
     - name: Run tests with coverage
       run: |
-        if compgen -G "test_*.py" > /dev/null || compgen -G "*_test.py" > /dev/null || [ -d tests/ ]; then
-          echo "✓ Test files found, running coverage"
-          pytest --cov=. --cov-report=xml --cov-report=html --cov-report=term-missing
-        else
-          echo "⚠️  No test files found - creating minimal coverage report"
-          mkdir -p htmlcov
-          printf '%s\n' '<?xml version="1.0" ?>' \
-            '<coverage version="1.0" timestamp="0" line-rate="0" branch-rate="0">' \
-            '  <packages/>' \
-            '</coverage>' > coverage.xml
-        fi
+        pytest --cov=terminal_pressure --cov-report=xml --cov-report=term-missing --cov-branch
 
-    - name: Upload coverage XML report
+    - name: Upload coverage reports
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-      if: always()
       with:
-        name: coverage-report-${{ matrix.python-version }}
+        name: coverage-report-py${{ matrix.python-version }}
         path: coverage.xml
-
-    - name: Upload HTML coverage report
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-      if: always()
-      with:
-        name: coverage-html-report-${{ matrix.python-version }}
-        path: htmlcov/

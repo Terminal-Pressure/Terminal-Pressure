@@ -44,6 +44,8 @@ jobs:
   dependency-audit:
     name: Python dependency audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
     - name: Checkout repository
@@ -52,7 +54,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
       with:
-        python-version: '3.10'
+        python-version: '3.12'
 
     - name: Install dependencies
       run: |
@@ -61,7 +63,7 @@ jobs:
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
     - name: Run pip-audit
-      run: pip-audit
+      run: pip-audit --requirement requirements.txt
       continue-on-error: true
 
   codeql:
@@ -87,6 +89,8 @@ jobs:
   semgrep:
     name: Semgrep
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
     - name: Checkout repository
@@ -100,6 +104,8 @@ jobs:
   checkov:
     name: Checkov IaC audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
     - name: Checkout repository
@@ -125,7 +131,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
       with:
-        python-version: '3.10'
+        python-version: '3.12'
 
     - name: Install Bandit
       run: pip install bandit[toml]

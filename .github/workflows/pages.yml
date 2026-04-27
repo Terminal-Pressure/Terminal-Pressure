@@ -27,7 +27,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
       with:
-        python-version: '3.10'
+        python-version: '3.12'
 
     - name: Install dependencies
       run: |
@@ -37,13 +37,11 @@ jobs:
 
     - name: Build documentation
       run: |
-        # Create a simple mkdocs config if it doesn't exist
+        # Create a minimal mkdocs config if one does not already exist
         if [ ! -f mkdocs.yml ]; then
-          echo "site_name: Terminal Pressure" > mkdocs.yml
-          echo "theme: readthedocs" >> mkdocs.yml
+          printf 'site_name: Terminal Pressure\ntheme:\n  name: material\nnav:\n  - Home: index.md\n' > mkdocs.yml
           mkdir -p docs
-          echo "# Terminal Pressure" > docs/index.md
-          echo "Documentation placeholder" >> docs/index.md
+          cp README.md docs/index.md
         fi
         mkdocs build
 
@@ -57,8 +55,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
     - name: Deploy to GitHub Pages
+      id: deployment
       uses: actions/deploy-pages@7ea23745a51b1a52d24bd347014f80844cc5e2a4  # v4
-      if: false  # Disable actual deployment for pull requests
