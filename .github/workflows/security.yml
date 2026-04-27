@@ -103,8 +103,9 @@ jobs:
 
     - name: Install and Run Semgrep
       run: |
-        python -m pip install semgrep
-        semgrep ci --config auto || true
+        python -m pip install semgrep==1.95.0
+        semgrep ci --config auto
+      continue-on-error: true
 
   checkov:
     name: Checkov IaC audit
