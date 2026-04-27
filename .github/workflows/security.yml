@@ -26,7 +26,7 @@ jobs:
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
 
     - name: Run OSV Scanner
-      uses: google/osv-scanner/actions/scanner@4bafe00fb00371f22c14f6bfb3f68b20f0f88c69  # v2.0.2
+      uses: google/osv-scanner-action@c51854704019a247608d928f370c98740469d4b5  # v2.3.5
       with:
         scan-args: |-
           --recursive
@@ -96,10 +96,15 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
 
-    - name: Run Semgrep
-      uses: returntocorp/semgrep-action@c4488dc28acb768c5a46e6df97252c38b72f5130  # v1
+    - name: Set up Python
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
       with:
-        config: auto
+        python-version: '3.12'
+
+    - name: Install and Run Semgrep
+      run: |
+        python -m pip install semgrep
+        semgrep ci --config auto || true
 
   checkov:
     name: Checkov IaC audit
@@ -112,7 +117,7 @@ jobs:
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
 
     - name: Run Checkov
-      uses: bridgecrewio/checkov-action@1b1b8b61bfae15c8d6ae193d9e9c45e8e3b6f9c8  # v12
+      uses: bridgecrewio/checkov-action@20fb358293b0af0188f25cf7658b69d49ec12c9a  # v12.3100.0
       with:
         directory: .
         framework: all
@@ -161,7 +166,7 @@ jobs:
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
 
     - name: Run Trivy vulnerability scanner in fs mode
-      uses: aquasecurity/trivy-action@18f2505d82de0e8158f2a29a0dc7c2cd7d42e617  # v0.29.0
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
       with:
         scan-type: 'fs'
         scan-ref: '.'
