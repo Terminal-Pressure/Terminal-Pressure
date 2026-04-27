@@ -1,2 +1,4 @@
 python-nmap
 scapy
+pytest
+pytest-cov
