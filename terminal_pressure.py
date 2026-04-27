@@ -33,6 +33,7 @@ from scapy.all import IP, TCP, Raw, send  # type: ignore[import]
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+VERSION: str = "1.0.0"
 DEFAULT_PORT: int = 80
 DEFAULT_THREADS: int = 50
 DEFAULT_DURATION: int = 60
@@ -477,6 +478,9 @@ def main() -> None:
     )
 
     # Global arguments
+    parser.add_argument(
+        "--version", action="version", version=f"Terminal Pressure v{VERSION}"
+    )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose (debug) output"
     )

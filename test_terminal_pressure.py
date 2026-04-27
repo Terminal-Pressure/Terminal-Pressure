@@ -36,6 +36,7 @@ from terminal_pressure import (
     OUTPUT_FORMAT_TEXT,
     PORT_SCAN_RANGE,
     VALID_OUTPUT_FORMATS,
+    VERSION,
     _configure_logging,
     _validate_duration,
     _validate_output_format,
@@ -613,6 +614,12 @@ class TestMain:
             main()
         mock_configure.assert_called_once_with(verbose=False, quiet=True)
 
+    def test_version_flag(self):
+        with patch("sys.argv", ["tp", "--version"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
 
 # ===========================================================================
 # _configure_logging tests
@@ -685,6 +692,13 @@ class TestConstants:
     def test_valid_output_formats(self):
         assert OUTPUT_FORMAT_TEXT in VALID_OUTPUT_FORMATS
         assert OUTPUT_FORMAT_JSON in VALID_OUTPUT_FORMATS
+
+    def test_version_format(self):
+        # Version should be a string like "1.0.0"
+        assert isinstance(VERSION, str)
+        parts = VERSION.split(".")
+        assert len(parts) == 3
+        assert all(part.isdigit() for part in parts)
 
 
 # ===========================================================================
