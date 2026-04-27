@@ -61,16 +61,17 @@ python terminal_pressure.py exploit 192.168.1.1 --payload custom_payload
 |------|-------------|
 | `-v, --verbose` | Enable debug logging |
 | `-q, --quiet` | Suppress info messages (warnings/errors only) |
-| `-f, --output-format` | Output format: `text` (default) or `json` |
+| `-f, --output-format` | Output format: `text` (default), `json`, or `csv` |
+| `--version` | Show version and exit |
 
-### JSON Output
+### Output Formats
 
 ```bash
-# Get scan results as JSON
+# JSON output
 python terminal_pressure.py -f json scan 192.168.1.1
 
-# Stress test with JSON output
-python terminal_pressure.py -f json stress localhost --port 8080 --threads 10 --duration 5
+# CSV output (for spreadsheets/automation)
+python terminal_pressure.py -f csv stress localhost --port 8080 --threads 10 --duration 5
 ```
 
 **Example JSON Output (stress test):**
@@ -80,11 +81,21 @@ python terminal_pressure.py -f json stress localhost --port 8080 --threads 10 --
   "port": 8080,
   "threads": 10,
   "duration": 5,
+  "actual_duration_seconds": 5.02,
   "connections_attempted": 1523,
   "connections_succeeded": 1520,
-  "connections_failed": 3
+  "connections_failed": 3,
+  "connections_per_second": 303.39
 }
 ```
+
+### Exit Codes
+
+| Code | Description |
+|------|-------------|
+| 0 | Success |
+| 1 | Runtime error |
+| 2 | Validation error (invalid arguments) |
 
 ### Environment Variables
 
@@ -98,7 +109,7 @@ python terminal_pressure.py -f json stress localhost --port 8080 --threads 10 --
 
 Performs nmap vulnerability scan against target.
 
-**Returns:** `dict` with keys: `target`, `hosts` (list of discovered hosts with port/vuln info)
+**Returns:** `dict` with keys: `target`, `hosts`, `scan_time_seconds`
 
 ### `stress_test(target, port=80, threads=50, duration=60, output_format="text")`
 
@@ -106,13 +117,13 @@ Runs connection-flood stress test against target.
 
 **Safety Limits:** max 1000 threads, max 3600 seconds duration
 
-**Returns:** `dict` with keys: `target`, `port`, `threads`, `duration`, `connections_attempted`, `connections_succeeded`, `connections_failed`
+**Returns:** `dict` with keys: `target`, `port`, `threads`, `duration`, `actual_duration_seconds`, `connections_attempted`, `connections_succeeded`, `connections_failed`, `connections_per_second`
 
 ### `exploit_chain(target, payload="default_backdoor", output_format="text")`
 
 Simulates exploit delivery chain against target.
 
-**Returns:** `dict` with keys: `target`, `payload`, `status`, `message`
+**Returns:** `dict` with keys: `target`, `payload`, `status`, `message`, `timestamp`
 
 ## Development
 
@@ -128,8 +139,8 @@ pytest test_terminal_pressure.py
 
 ### Test Coverage
 
-- **104 tests** covering all functions and edge cases
-- **97% branch coverage**
+- **117 tests** covering all functions and edge cases
+- **98% branch coverage**
 - All external dependencies mocked (no real network traffic in tests)
 
 ## Architecture
