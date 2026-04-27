@@ -1,0 +1,59 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    name: Ruff Linting
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
+    - name: Set up Python
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Ruff
+      run: pip install ruff
+
+    - name: Run Ruff lint
+      run: ruff check --output-format=github .
+      continue-on-error: true
+
+    - name: Run Ruff format check
+      run: ruff format --check .
+      continue-on-error: true
+
+  mypy:
+    name: Type Checking
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
+    - name: Set up Python
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        pip install mypy
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: Run mypy
+      run: mypy . --ignore-missing-imports
+      continue-on-error: true

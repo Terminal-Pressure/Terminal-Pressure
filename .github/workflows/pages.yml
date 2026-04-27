@@ -5,6 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -14,22 +19,22 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
-    
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
       with:
         python-version: '3.10'
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install mkdocs mkdocs-material
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    
+
     - name: Build documentation
       run: |
         # Create a simple mkdocs config if it doesn't exist
@@ -41,19 +46,19 @@ jobs:
           echo "Documentation placeholder" >> docs/index.md
         fi
         mkdocs build
-    
+
     - name: Upload artifact
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
       with:
         name: github-pages
         path: site/
-  
+
   deploy:
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
+
     steps:
     - name: Deploy to GitHub Pages
-      uses: actions/deploy-pages@v4
+      uses: actions/deploy-pages@7ea23745a51b1a52d24bd347014f80844cc5e2a4  # v4
       if: false  # Disable actual deployment for pull requests

@@ -1,4 +1,4 @@
-name: Coverage Report
+name: Test Suite
 
 on:
   push:
@@ -12,11 +12,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  coverage:
-    runs-on: ubuntu-latest
+  test:
+    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.10']
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.10', '3.11', '3.12']
 
     steps:
     - name: Checkout repository
@@ -27,7 +30,7 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
-    - name: Cache Python dependencies
+    - name: Cache dependencies
       uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a  # v4
       with:
         path: ~/.cache/pip
@@ -40,31 +43,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install pytest pytest-cov
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      shell: bash
 
-    - name: Run tests with coverage
+    - name: Run tests
       run: |
         if compgen -G "test_*.py" > /dev/null || compgen -G "*_test.py" > /dev/null || [ -d tests/ ]; then
-          echo "✓ Test files found, running coverage"
-          pytest --cov=. --cov-report=xml --cov-report=html --cov-report=term-missing
+          pytest -v --tb=short
         else
-          echo "⚠️  No test files found - creating minimal coverage report"
-          mkdir -p htmlcov
-          printf '%s\n' '<?xml version="1.0" ?>' \
-            '<coverage version="1.0" timestamp="0" line-rate="0" branch-rate="0">' \
-            '  <packages/>' \
-            '</coverage>' > coverage.xml
+          echo "⚠️ No tests found, skipping"
         fi
-
-    - name: Upload coverage XML report
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-      if: always()
-      with:
-        name: coverage-report-${{ matrix.python-version }}
-        path: coverage.xml
-
-    - name: Upload HTML coverage report
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-      if: always()
-      with:
-        name: coverage-html-report-${{ matrix.python-version }}
-        path: htmlcov/
+      shell: bash
