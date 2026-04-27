@@ -1,0 +1,12 @@
+# Default owners for everything
+* @Terminal-Pressure
+
+# GitHub Actions workflows
+/.github/workflows/ @Terminal-Pressure
+
+# CI/CD configuration
+/.github/ @Terminal-Pressure
+
+# Documentation
+/docs/ @Terminal-Pressure
+*.md @Terminal-Pressure
