@@ -51,6 +51,9 @@ python terminal_pressure.py scan 192.168.1.1
 # Stress test with custom options
 python terminal_pressure.py stress 192.168.1.1 --port 8080 --threads 100 --duration 30
 
+# Stress test with custom timeout and retries
+python terminal_pressure.py stress 192.168.1.1 --timeout 10.0 --retries 3
+
 # Exploit chain simulation
 python terminal_pressure.py exploit 192.168.1.1 --payload custom_payload
 ```
@@ -63,6 +66,16 @@ python terminal_pressure.py exploit 192.168.1.1 --payload custom_payload
 | `-q, --quiet` | Suppress info messages (warnings/errors only) |
 | `-f, --output-format` | Output format: `text` (default), `json`, or `csv` |
 | `--version` | Show version and exit |
+
+### Stress Test Options
+
+| Flag | Description | Default | Range |
+|------|-------------|---------|-------|
+| `--port` | Target port | 80 | 1-65535 |
+| `--threads` | Concurrent threads | 50 | 1-1000 |
+| `--duration` | Duration in seconds | 60 | 1-3600 |
+| `--timeout` | Socket timeout in seconds | 5.0 | 0.1-300 |
+| `--retries` | Retries for failed connections | 0 | 0-10 |
 
 ### Output Formats
 
@@ -81,10 +94,13 @@ python terminal_pressure.py -f csv stress localhost --port 8080 --threads 10 --d
   "port": 8080,
   "threads": 10,
   "duration": 5,
+  "timeout": 5.0,
+  "retries": 0,
   "actual_duration_seconds": 5.02,
   "connections_attempted": 1523,
   "connections_succeeded": 1520,
   "connections_failed": 3,
+  "connections_retried": 0,
   "connections_per_second": 303.39
 }
 ```
@@ -111,13 +127,13 @@ Performs nmap vulnerability scan against target.
 
 **Returns:** `dict` with keys: `target`, `hosts`, `scan_time_seconds`
 
-### `stress_test(target, port=80, threads=50, duration=60, output_format="text")`
+### `stress_test(target, port=80, threads=50, duration=60, output_format="text", timeout=5.0, retries=0)`
 
 Runs connection-flood stress test against target.
 
-**Safety Limits:** max 1000 threads, max 3600 seconds duration
+**Safety Limits:** max 1000 threads, max 3600 seconds duration, max 300s timeout, max 10 retries
 
-**Returns:** `dict` with keys: `target`, `port`, `threads`, `duration`, `actual_duration_seconds`, `connections_attempted`, `connections_succeeded`, `connections_failed`, `connections_per_second`
+**Returns:** `dict` with keys: `target`, `port`, `threads`, `duration`, `timeout`, `retries`, `actual_duration_seconds`, `connections_attempted`, `connections_succeeded`, `connections_failed`, `connections_retried`, `connections_per_second`
 
 ### `exploit_chain(target, payload="default_backdoor", output_format="text")`
 
@@ -139,8 +155,8 @@ pytest test_terminal_pressure.py
 
 ### Test Coverage
 
-- **117 tests** covering all functions and edge cases
-- **98% branch coverage**
+- **142 tests** covering all functions and edge cases
+- **99% branch coverage**
 - All external dependencies mocked (no real network traffic in tests)
 
 ## Architecture

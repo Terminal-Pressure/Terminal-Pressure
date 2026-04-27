@@ -48,6 +48,10 @@ EXPLOIT_MAGIC: bytes = b"CHAOS_AWAKEN"
 # Safety limits
 MAX_THREADS: int = 1000
 MAX_DURATION: int = 3600  # 1 hour max
+MIN_TIMEOUT: float = 0.1
+MAX_TIMEOUT: float = 300.0  # 5 minutes max
+DEFAULT_RETRIES: int = 0
+MAX_RETRIES: int = 10
 
 # Output format options
 OUTPUT_FORMAT_TEXT: str = "text"
@@ -170,6 +174,44 @@ def _validate_output_format(output_format: str) -> str:
             f"Valid options: {', '.join(VALID_OUTPUT_FORMATS)}"
         )
     return output_format
+
+
+def _validate_timeout(timeout: float) -> float:
+    """Validate that the timeout is within acceptable limits.
+
+    Args:
+        timeout: Timeout value in seconds.
+
+    Returns:
+        The validated timeout value.
+
+    Raises:
+        ValueError: If *timeout* is outside [MIN_TIMEOUT, MAX_TIMEOUT].
+    """
+    if not isinstance(timeout, (int, float)) or timeout < MIN_TIMEOUT:
+        raise ValueError(f"Timeout must be at least {MIN_TIMEOUT} seconds, got {timeout!r}.")
+    if timeout > MAX_TIMEOUT:
+        raise ValueError(f"Timeout {timeout}s exceeds maximum allowed ({MAX_TIMEOUT}s).")
+    return float(timeout)
+
+
+def _validate_retries(retries: int) -> int:
+    """Validate that the retry count is within acceptable limits.
+
+    Args:
+        retries: Number of retries.
+
+    Returns:
+        The validated retry count.
+
+    Raises:
+        ValueError: If *retries* is negative or exceeds MAX_RETRIES.
+    """
+    if not isinstance(retries, int) or retries < 0:
+        raise ValueError(f"Retries must be a non-negative integer, got {retries!r}.")
+    if retries > MAX_RETRIES:
+        raise ValueError(f"Retries {retries} exceeds maximum allowed ({MAX_RETRIES}).")
+    return retries
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +347,8 @@ def stress_test(
     threads: int = DEFAULT_THREADS,
     duration: int = DEFAULT_DURATION,
     output_format: str = OUTPUT_FORMAT_TEXT,
+    timeout: float = SOCKET_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
 ) -> dict[str, Any]:
     """Simulate a connection-flood stress test against *target*:*port*.
 
@@ -322,6 +366,8 @@ def stress_test(
         threads: Number of concurrent worker threads (default: 50, max: 1000).
         duration: How long (in seconds) each worker thread floods (default: 60, max: 3600).
         output_format: Output format ('text', 'json', or 'csv'). Default: 'text'.
+        timeout: Socket timeout in seconds (default: 5.0, range: 0.1-300).
+        retries: Number of retries for failed connections (default: 0, max: 10).
 
     Returns:
         A dictionary containing stress test results with keys:
@@ -329,10 +375,13 @@ def stress_test(
         - 'port': The target port
         - 'threads': Number of threads used
         - 'duration': Duration in seconds
+        - 'timeout': Socket timeout used
+        - 'retries': Number of retries configured
         - 'actual_duration_seconds': Actual elapsed time
         - 'connections_attempted': Total connection attempts
         - 'connections_succeeded': Successful connections
         - 'connections_failed': Failed connections
+        - 'connections_retried': Total retry attempts
         - 'connections_per_second': Average connections per second
 
     Raises:
@@ -347,41 +396,59 @@ def stress_test(
     threads = _validate_threads(threads)
     duration = _validate_duration(duration)
     output_format = _validate_output_format(output_format)
+    timeout = _validate_timeout(timeout)
+    retries = _validate_retries(retries)
 
     logger.info(
-        "Applying pressure to %s:%d with %d threads for %ds", target, port, threads, duration
+        "Applying pressure to %s:%d with %d threads for %ds (timeout=%.1fs, retries=%d)",
+        target, port, threads, duration, timeout, retries
     )
 
     start_time = time.time()
 
     # Thread-safe counters
     stats_lock = threading.Lock()
-    stats = {"attempted": 0, "succeeded": 0, "failed": 0}
+    stats = {"attempted": 0, "succeeded": 0, "failed": 0, "retried": 0}
 
     def flood() -> None:
         """Inner worker: open, send, close in a tight loop until time is up."""
         end_time = time.time() + duration
         while time.time() < end_time:
-            sock: Optional[socket.socket] = None
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(SOCKET_TIMEOUT)
-                sock.connect((target, port))
-                sock.sendall(b"GET / HTTP/1.1\r\nHost: " + target.encode() + b"\r\n\r\n")
-                with stats_lock:
-                    stats["attempted"] += 1
-                    stats["succeeded"] += 1
-            except OSError:
-                # Connection refused / timeout / DNS failure – keep going
-                with stats_lock:
-                    stats["attempted"] += 1
-                    stats["failed"] += 1
-            finally:
-                if sock is not None:
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
+            remaining_attempts = retries + 1  # Initial attempt + retries
+            attempt_number = 0
+            success = False
+            current_time = time.time()
+
+            while remaining_attempts > 0 and not success and current_time < end_time:
+                attempt_number += 1
+                sock: Optional[socket.socket] = None
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(timeout)
+                    sock.connect((target, port))
+                    sock.sendall(b"GET / HTTP/1.1\r\nHost: " + target.encode() + b"\r\n\r\n")
+                    success = True
+                    with stats_lock:
+                        stats["attempted"] += 1
+                        stats["succeeded"] += 1
+                except OSError:
+                    # Connection refused / timeout / DNS failure
+                    remaining_attempts -= 1
+                    with stats_lock:
+                        stats["attempted"] += 1
+                        if remaining_attempts > 0:
+                            # This attempt failed but we'll retry
+                            stats["retried"] += 1
+                        else:
+                            # No more retries, count as failed
+                            stats["failed"] += 1
+                finally:
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except OSError:
+                            pass
+                current_time = time.time()
 
     started: list[threading.Thread] = []
     for _ in range(threads):
@@ -403,10 +470,13 @@ def stress_test(
         "port": port,
         "threads": threads,
         "duration": duration,
+        "timeout": timeout,
+        "retries": retries,
         "actual_duration_seconds": round(actual_duration, 2),
         "connections_attempted": stats["attempted"],
         "connections_succeeded": stats["succeeded"],
         "connections_failed": stats["failed"],
+        "connections_retried": stats["retried"],
         "connections_per_second": connections_per_second,
     }
 
@@ -607,6 +677,18 @@ def main() -> int:
         default=DEFAULT_DURATION,
         help=f"Duration in seconds (max: {MAX_DURATION})",
     )
+    stress_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=SOCKET_TIMEOUT,
+        help=f"Socket timeout in seconds (default: {SOCKET_TIMEOUT}, range: {MIN_TIMEOUT}-{MAX_TIMEOUT})",
+    )
+    stress_parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help=f"Retries for failed connections (default: {DEFAULT_RETRIES}, max: {MAX_RETRIES})",
+    )
 
     # -- exploit sub-command
     exploit_parser = subparsers.add_parser("exploit", help="Exploit chain (advanced)")
@@ -630,6 +712,8 @@ def main() -> int:
                 args.threads,
                 args.duration,
                 output_format=args.output_format,
+                timeout=args.timeout,
+                retries=args.retries,
             )
         elif args.command == "exploit":
             exploit_chain(args.target, args.payload, output_format=args.output_format)

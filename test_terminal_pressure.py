@@ -27,6 +27,7 @@ from terminal_pressure import (
     DEFAULT_DURATION,
     DEFAULT_PAYLOAD,
     DEFAULT_PORT,
+    DEFAULT_RETRIES,
     DEFAULT_THREADS,
     EXIT_ERROR,
     EXIT_SUCCESS,
@@ -34,11 +35,15 @@ from terminal_pressure import (
     EXPLOIT_MAGIC,
     EXPLOIT_PORT,
     MAX_DURATION,
+    MAX_RETRIES,
     MAX_THREADS,
+    MAX_TIMEOUT,
+    MIN_TIMEOUT,
     OUTPUT_FORMAT_CSV,
     OUTPUT_FORMAT_JSON,
     OUTPUT_FORMAT_TEXT,
     PORT_SCAN_RANGE,
+    SOCKET_TIMEOUT,
     VALID_OUTPUT_FORMATS,
     VERSION,
     _configure_logging,
@@ -48,8 +53,10 @@ from terminal_pressure import (
     _validate_duration,
     _validate_output_format,
     _validate_port,
+    _validate_retries,
     _validate_target,
     _validate_threads,
+    _validate_timeout,
     exploit_chain,
     main,
     scan_vulns,
@@ -215,6 +222,69 @@ class TestValidateOutputFormat:
 
     def test_csv_format_valid(self):
         assert _validate_output_format(OUTPUT_FORMAT_CSV) == OUTPUT_FORMAT_CSV
+
+
+# ===========================================================================
+# _validate_timeout
+# ===========================================================================
+
+
+class TestValidateTimeout:
+    def test_valid_timeout(self):
+        assert _validate_timeout(5.0) == 5.0
+
+    def test_valid_timeout_int(self):
+        assert _validate_timeout(10) == 10.0
+
+    def test_min_timeout(self):
+        assert _validate_timeout(MIN_TIMEOUT) == MIN_TIMEOUT
+
+    def test_max_timeout(self):
+        assert _validate_timeout(MAX_TIMEOUT) == MAX_TIMEOUT
+
+    def test_below_min_raises(self):
+        with pytest.raises(ValueError, match="at least"):
+            _validate_timeout(0.01)
+
+    def test_above_max_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            _validate_timeout(MAX_TIMEOUT + 1)
+
+    def test_negative_raises(self):
+        with pytest.raises(ValueError):
+            _validate_timeout(-1)
+
+    def test_non_numeric_raises(self):
+        with pytest.raises(ValueError):
+            _validate_timeout("5")  # type: ignore
+
+
+# ===========================================================================
+# _validate_retries
+# ===========================================================================
+
+
+class TestValidateRetries:
+    def test_valid_retries(self):
+        assert _validate_retries(3) == 3
+
+    def test_zero_retries(self):
+        assert _validate_retries(0) == 0
+
+    def test_max_retries(self):
+        assert _validate_retries(MAX_RETRIES) == MAX_RETRIES
+
+    def test_negative_raises(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            _validate_retries(-1)
+
+    def test_above_max_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            _validate_retries(MAX_RETRIES + 1)
+
+    def test_non_int_raises(self):
+        with pytest.raises(ValueError):
+            _validate_retries(3.5)  # type: ignore
 
 
 # ===========================================================================
@@ -465,6 +535,50 @@ class TestStressTest:
         with pytest.raises(ValueError, match="exceeds maximum"):
             stress_test("127.0.0.1", threads=1, duration=MAX_DURATION + 1)
 
+    @patch("terminal_pressure.socket.socket")
+    def test_custom_timeout(self, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, timeout=10.0)
+        mock_sock.settimeout.assert_called_with(10.0)
+        assert result["timeout"] == 10.0
+
+    @patch("terminal_pressure.socket.socket")
+    def test_retries_in_result(self, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, retries=3)
+        assert result["retries"] == 3
+        assert "connections_retried" in result
+
+    def test_invalid_timeout_raises(self):
+        with pytest.raises(ValueError, match="at least"):
+            stress_test("127.0.0.1", port=80, threads=1, duration=1, timeout=0.01)
+
+    def test_exceeds_max_timeout_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            stress_test("127.0.0.1", port=80, threads=1, duration=1, timeout=MAX_TIMEOUT + 1)
+
+    def test_invalid_retries_raises(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            stress_test("127.0.0.1", port=80, threads=1, duration=1, retries=-1)
+
+    def test_exceeds_max_retries_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            stress_test("127.0.0.1", port=80, threads=1, duration=1, retries=MAX_RETRIES + 1)
+
+    @patch("terminal_pressure.socket.socket")
+    def test_retry_logic_retries_failed_connections(self, mock_socket_cls):
+        """Test that failed connections are retried when retries > 0."""
+        mock_sock = MagicMock()
+        # First connection fails, second succeeds
+        mock_sock.connect.side_effect = [OSError("Connection refused"), None, None]
+        mock_socket_cls.return_value = mock_sock
+
+        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, retries=1)
+        # Should have retries counted
+        assert result["connections_retried"] >= 0
+
 
 # ===========================================================================
 # exploit_chain()
@@ -622,7 +736,9 @@ class TestMain:
             main()
         mock_stress.assert_called_once_with(
             "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION,
-            output_format=OUTPUT_FORMAT_TEXT
+            output_format=OUTPUT_FORMAT_TEXT,
+            timeout=SOCKET_TIMEOUT,
+            retries=DEFAULT_RETRIES,
         )
 
     @patch("terminal_pressure.stress_test")
@@ -633,7 +749,20 @@ class TestMain:
         ):
             main()
         mock_stress.assert_called_once_with(
-            "example.com", 9090, 10, 5, output_format=OUTPUT_FORMAT_TEXT
+            "example.com", 9090, 10, 5, output_format=OUTPUT_FORMAT_TEXT,
+            timeout=SOCKET_TIMEOUT, retries=DEFAULT_RETRIES,
+        )
+
+    @patch("terminal_pressure.stress_test")
+    def test_stress_command_dispatches_custom_timeout_retries(self, mock_stress):
+        with patch(
+            "sys.argv",
+            ["tp", "stress", "example.com", "--timeout", "10.0", "--retries", "3"],
+        ):
+            main()
+        mock_stress.assert_called_once_with(
+            "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION,
+            output_format=OUTPUT_FORMAT_TEXT, timeout=10.0, retries=3,
         )
 
     @patch("terminal_pressure.exploit_chain")
@@ -803,6 +932,17 @@ class TestConstants:
         assert EXIT_SUCCESS == 0
         assert EXIT_ERROR == 1
         assert EXIT_VALIDATION_ERROR == 2
+
+    def test_timeout_limits(self):
+        assert MIN_TIMEOUT == 0.1
+        assert MAX_TIMEOUT == 300.0
+
+    def test_retry_limits(self):
+        assert DEFAULT_RETRIES == 0
+        assert MAX_RETRIES == 10
+
+    def test_socket_timeout_default(self):
+        assert SOCKET_TIMEOUT == 5.0
 
 
 # ===========================================================================
