@@ -11,6 +11,7 @@ Run with:
 """
 
 import argparse
+import json
 import socket
 import sys
 import threading
@@ -30,8 +31,24 @@ from terminal_pressure import (
     DEFAULT_THREADS,
     EXPLOIT_MAGIC,
     EXPLOIT_PORT,
+    MAX_DURATION,
+    MAX_THREADS,
+    OUTPUT_CSV,
+    OUTPUT_JSON,
+    OUTPUT_TEXT,
     PORT_SCAN_RANGE,
+    ExploitResult,
+    HostResult,
+    PortResult,
+    ScanResult,
+    StressResult,
+    _expand_cidr,
+    _is_valid_cidr,
+    _is_valid_hostname,
+    _is_valid_ip,
+    _resolve_hostname,
     _validate_duration,
+    _validate_output_format,
     _validate_port,
     _validate_target,
     _validate_threads,
@@ -442,7 +459,19 @@ class TestMain:
     def test_scan_command_dispatches(self, mock_scan):
         with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
             main()
-        mock_scan.assert_called_once_with("192.168.1.1")
+        mock_scan.assert_called_once_with("192.168.1.1", output_format="text")
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_scan_command_with_json_format(self, mock_scan):
+        with patch("sys.argv", ["tp", "scan", "192.168.1.1", "--format", "json"]):
+            main()
+        mock_scan.assert_called_once_with("192.168.1.1", output_format="json")
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_scan_command_with_csv_format(self, mock_scan):
+        with patch("sys.argv", ["tp", "scan", "192.168.1.1", "--format", "csv"]):
+            main()
+        mock_scan.assert_called_once_with("192.168.1.1", output_format="csv")
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_defaults(self, mock_stress):
@@ -482,7 +511,14 @@ class TestMain:
     def test_scan_uses_correct_target(self, mock_scan):
         with patch("sys.argv", ["tp", "scan", "my.host.local"]):
             main()
-        mock_scan.assert_called_once_with("my.host.local")
+        mock_scan.assert_called_once_with("my.host.local", output_format="text")
+
+    def test_version_command(self, capsys):
+        with patch("sys.argv", ["tp", "version"]):
+            main()
+        captured = capsys.readouterr()
+        assert "Terminal Pressure" in captured.out
+        assert tp.__version__ in captured.out
 
 
 # ===========================================================================
@@ -562,3 +598,244 @@ class TestIntegration:
         exploit_chain("192.168.0.1")
 
         mock_send.assert_called_once()
+
+
+# ===========================================================================
+# IP/Hostname validation helper tests
+# ===========================================================================
+
+
+class TestIsValidIp:
+    def test_valid_ipv4(self):
+        assert _is_valid_ip("192.168.1.1") is True
+
+    def test_valid_ipv6(self):
+        assert _is_valid_ip("::1") is True
+        assert _is_valid_ip("2001:db8::1") is True
+
+    def test_invalid_ip(self):
+        assert _is_valid_ip("192.168.1.256") is False
+        assert _is_valid_ip("example.com") is False
+        assert _is_valid_ip("") is False
+
+
+class TestIsValidCidr:
+    def test_valid_cidr(self):
+        assert _is_valid_cidr("192.168.1.0/24") is True
+        assert _is_valid_cidr("10.0.0.0/8") is True
+
+    def test_invalid_cidr(self):
+        assert _is_valid_cidr("192.168.1.1") is False  # No /
+        assert _is_valid_cidr("example.com") is False
+        assert _is_valid_cidr("192.168.1.0/33") is False
+
+
+class TestIsValidHostname:
+    def test_valid_hostname(self):
+        assert _is_valid_hostname("example.com") is True
+        assert _is_valid_hostname("sub.domain.example.com") is True
+        assert _is_valid_hostname("localhost") is True
+
+    def test_invalid_hostname(self):
+        assert _is_valid_hostname("") is False
+        assert _is_valid_hostname("-invalid.com") is False
+        assert _is_valid_hostname("a" * 300) is False  # Too long
+
+
+class TestExpandCidr:
+    def test_expand_small_network(self):
+        hosts = _expand_cidr("192.168.1.0/30")
+        assert len(hosts) == 2  # /30 has 2 usable hosts
+        assert "192.168.1.1" in hosts
+        assert "192.168.1.2" in hosts
+
+    def test_expand_invalid_cidr_returns_empty(self):
+        hosts = _expand_cidr("invalid")
+        assert hosts == []
+
+    def test_large_network_is_limited(self):
+        hosts = _expand_cidr("10.0.0.0/16")  # Would have thousands
+        assert len(hosts) <= 256
+
+
+class TestValidateOutputFormat:
+    def test_valid_formats(self):
+        assert _validate_output_format(OUTPUT_TEXT) == OUTPUT_TEXT
+        assert _validate_output_format(OUTPUT_JSON) == OUTPUT_JSON
+        assert _validate_output_format(OUTPUT_CSV) == OUTPUT_CSV
+
+    def test_invalid_format_raises(self):
+        with pytest.raises(ValueError):
+            _validate_output_format("xml")
+
+
+class TestValidateTargetEnhanced:
+    """Additional tests for enhanced target validation."""
+
+    def test_cidr_notation(self):
+        assert _validate_target("192.168.1.0/24") == "192.168.1.0/24"
+
+    def test_ipv6(self):
+        assert _validate_target("::1") == "::1"
+
+
+class TestValidateThreadsEnhanced:
+    """Additional tests for thread limits."""
+
+    def test_max_threads_exceeded_raises(self):
+        with pytest.raises(ValueError, match=str(MAX_THREADS)):
+            _validate_threads(MAX_THREADS + 1)
+
+
+class TestValidateDurationEnhanced:
+    """Additional tests for duration limits."""
+
+    def test_max_duration_exceeded_raises(self):
+        with pytest.raises(ValueError, match=str(MAX_DURATION)):
+            _validate_duration(MAX_DURATION + 1)
+
+
+# ===========================================================================
+# Data class tests
+# ===========================================================================
+
+
+class TestPortResult:
+    def test_port_result_creation(self):
+        pr = PortResult(port=80, protocol="tcp", state="open", service="http")
+        assert pr.port == 80
+        assert pr.protocol == "tcp"
+        assert pr.state == "open"
+        assert pr.service == "http"
+        assert pr.scripts == {}
+
+    def test_port_result_with_scripts(self):
+        pr = PortResult(
+            port=80,
+            protocol="tcp",
+            state="open",
+            service="http",
+            scripts={"http-vuln": "VULNERABLE"},
+        )
+        assert pr.scripts == {"http-vuln": "VULNERABLE"}
+
+
+class TestHostResult:
+    def test_host_result_creation(self):
+        hr = HostResult(host="192.168.1.1")
+        assert hr.host == "192.168.1.1"
+        assert hr.ports == []
+
+    def test_host_result_with_ports(self):
+        pr = PortResult(port=80, protocol="tcp", state="open", service="http")
+        hr = HostResult(host="192.168.1.1", ports=[pr])
+        assert len(hr.ports) == 1
+
+
+class TestScanResult:
+    def test_scan_result_creation(self):
+        sr = ScanResult(target="192.168.1.1")
+        assert sr.target == "192.168.1.1"
+        assert sr.hosts == []
+        assert sr.scan_time == 0.0
+        assert sr.error is None
+
+    def test_scan_result_to_dict(self):
+        sr = ScanResult(target="192.168.1.1", scan_time=1.5)
+        d = sr.to_dict()
+        assert d["target"] == "192.168.1.1"
+        assert d["scan_time"] == 1.5
+
+    def test_scan_result_to_json(self):
+        sr = ScanResult(target="192.168.1.1")
+        j = sr.to_json()
+        assert '"target": "192.168.1.1"' in j
+
+    def test_scan_result_to_csv(self):
+        pr = PortResult(port=80, protocol="tcp", state="open", service="http")
+        hr = HostResult(host="192.168.1.1", ports=[pr])
+        sr = ScanResult(target="192.168.1.1", hosts=[hr])
+        csv_output = sr.to_csv()
+        assert "192.168.1.1" in csv_output
+        assert "80" in csv_output
+
+
+class TestExploitResult:
+    def test_exploit_result_creation(self):
+        er = ExploitResult(target="192.168.1.1", payload="default_backdoor")
+        assert er.target == "192.168.1.1"
+        assert er.payload == "default_backdoor"
+        assert er.sent is False
+        assert er.error is None
+
+    def test_exploit_result_to_dict(self):
+        er = ExploitResult(target="192.168.1.1", payload="test", sent=True)
+        d = er.to_dict()
+        assert d["sent"] is True
+
+
+class TestStressResult:
+    def test_stress_result_creation(self):
+        sr = StressResult(target="192.168.1.1", port=80, threads=50, duration=60)
+        assert sr.target == "192.168.1.1"
+        assert sr.port == 80
+        assert sr.threads == 50
+        assert sr.duration == 60
+        assert sr.started is False
+
+
+# ===========================================================================
+# scan_vulns return value tests
+# ===========================================================================
+
+
+class TestScanVulnsReturnValue:
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_returns_scan_result(self, MockScanner, mock_scanner):
+        MockScanner.return_value = mock_scanner
+        result = scan_vulns("192.168.1.1")
+        assert isinstance(result, ScanResult)
+        assert result.target == "192.168.1.1"
+
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_returns_hosts_in_result(self, MockScanner, mock_scanner):
+        MockScanner.return_value = mock_scanner
+        result = scan_vulns("192.168.1.1")
+        assert len(result.hosts) >= 1
+
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_json_output(self, MockScanner, mock_scanner, capsys):
+        MockScanner.return_value = mock_scanner
+        scan_vulns("192.168.1.1", output_format=OUTPUT_JSON)
+        captured = capsys.readouterr()
+        # Validate JSON is well-formed and contains expected structure
+        parsed = json.loads(captured.out)
+        assert "target" in parsed
+        assert "hosts" in parsed
+        assert "scan_time" in parsed
+        assert parsed["target"] == "192.168.1.1"
+
+
+# ===========================================================================
+# exploit_chain return value tests
+# ===========================================================================
+
+
+class TestExploitChainReturnValue:
+    @patch("terminal_pressure.send")
+    @patch("terminal_pressure.Raw")
+    @patch("terminal_pressure.TCP")
+    @patch("terminal_pressure.IP")
+    def test_returns_exploit_result(self, mock_ip, mock_tcp, mock_raw, mock_send):
+        mock_ip.return_value = MagicMock()
+        result = exploit_chain("192.168.1.100")
+        assert isinstance(result, ExploitResult)
+        assert result.target == "192.168.1.100"
+        assert result.sent is True
+
+    @patch("terminal_pressure.send")
+    def test_custom_payload_returns_result(self, mock_send):
+        result = exploit_chain("10.0.0.1", payload="custom")
+        assert isinstance(result, ExploitResult)
+        assert result.payload == "custom"
+        assert result.sent is False
