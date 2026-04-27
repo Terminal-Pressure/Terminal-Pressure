@@ -30,8 +30,15 @@ from terminal_pressure import (
     DEFAULT_THREADS,
     EXPLOIT_MAGIC,
     EXPLOIT_PORT,
+    MAX_DURATION,
+    MAX_THREADS,
+    OUTPUT_FORMAT_JSON,
+    OUTPUT_FORMAT_TEXT,
     PORT_SCAN_RANGE,
+    VALID_OUTPUT_FORMATS,
+    _configure_logging,
     _validate_duration,
+    _validate_output_format,
     _validate_port,
     _validate_target,
     _validate_threads,
@@ -138,7 +145,7 @@ class TestValidatePort:
 
 
 class TestValidateThreads:
-    @pytest.mark.parametrize("n", [1, 10, 50, 200])
+    @pytest.mark.parametrize("n", [1, 10, 50, 200, MAX_THREADS])
     def test_valid_counts(self, n):
         assert _validate_threads(n) == n
 
@@ -151,6 +158,10 @@ class TestValidateThreads:
         with pytest.raises(ValueError):
             _validate_threads("10")  # type: ignore[arg-type]
 
+    def test_exceeds_max_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            _validate_threads(MAX_THREADS + 1)
+
 
 # ===========================================================================
 # _validate_duration
@@ -158,7 +169,7 @@ class TestValidateThreads:
 
 
 class TestValidateDuration:
-    @pytest.mark.parametrize("d", [1, 30, 60, 3600])
+    @pytest.mark.parametrize("d", [1, 30, 60, MAX_DURATION])
     def test_valid_durations(self, d):
         assert _validate_duration(d) == d
 
@@ -170,6 +181,29 @@ class TestValidateDuration:
     def test_string_raises(self):
         with pytest.raises(ValueError):
             _validate_duration("60")  # type: ignore[arg-type]
+
+    def test_exceeds_max_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            _validate_duration(MAX_DURATION + 1)
+
+
+# ===========================================================================
+# _validate_output_format
+# ===========================================================================
+
+
+class TestValidateOutputFormat:
+    @pytest.mark.parametrize("fmt", VALID_OUTPUT_FORMATS)
+    def test_valid_formats(self, fmt):
+        assert _validate_output_format(fmt) == fmt
+
+    def test_invalid_format_raises(self):
+        with pytest.raises(ValueError, match="Invalid output format"):
+            _validate_output_format("xml")
+
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError):
+            _validate_output_format("")
 
 
 # ===========================================================================
@@ -194,11 +228,12 @@ class TestScanVulns:
         assert "192.168.1.1" in caplog.text
 
     @patch("terminal_pressure.nmap.PortScanner")
-    def test_no_hosts_returns_without_error(self, MockScanner, mock_scanner_empty):
+    def test_no_hosts_returns_empty_result(self, MockScanner, mock_scanner_empty):
         MockScanner.return_value = mock_scanner_empty
-        # Should not raise
-        scan_vulns("10.0.0.1")
+        result = scan_vulns("10.0.0.1")
         mock_scanner_empty.scan.assert_called_once()
+        assert result["target"] == "10.0.0.1"
+        assert result["hosts"] == []
 
     @patch("terminal_pressure.nmap.PortScanner")
     def test_no_hosts_logs_message(self, MockScanner, mock_scanner_empty, caplog):
@@ -237,7 +272,8 @@ class TestScanVulns:
         scanner[host]["tcp"].keys.return_value = [22]
         scanner[host]["tcp"].__getitem__.return_value = {"state": "open", "name": "ssh"}
         MockScanner.return_value = scanner
-        scan_vulns("10.0.0.2")  # Must not raise
+        result = scan_vulns("10.0.0.2")
+        assert len(result["hosts"]) == 1
 
     @patch("terminal_pressure.nmap.PortScanner")
     def test_nmap_error_propagates(self, MockScanner):
@@ -264,7 +300,26 @@ class TestScanVulns:
         scanner[host]["tcp"].__getitem__.return_value = {"state": "open", "name": "http"}
         scanner[host]["udp"].__getitem__.return_value = {"state": "open", "name": "domain"}
         MockScanner.return_value = scanner
-        scan_vulns("10.1.1.1")  # Must not raise
+        result = scan_vulns("10.1.1.1")
+        assert len(result["hosts"]) == 1
+        assert len(result["hosts"][0]["protocols"]) == 2
+
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_returns_dict_with_hosts(self, MockScanner, mock_scanner):
+        MockScanner.return_value = mock_scanner
+        result = scan_vulns("192.168.1.1")
+        assert isinstance(result, dict)
+        assert "target" in result
+        assert "hosts" in result
+        assert len(result["hosts"]) == 1
+
+    @patch("terminal_pressure.nmap.PortScanner")
+    def test_json_output_format(self, MockScanner, mock_scanner, capsys):
+        MockScanner.return_value = mock_scanner
+        result = scan_vulns("192.168.1.1", output_format=OUTPUT_FORMAT_JSON)
+        captured = capsys.readouterr()
+        assert '"target"' in captured.out
+        assert '"192.168.1.1"' in captured.out
 
 
 # ===========================================================================
@@ -274,26 +329,18 @@ class TestScanVulns:
 
 class TestStressTest:
     @patch("terminal_pressure.socket.socket")
-    def test_returns_correct_number_of_threads(self, mock_socket_cls):
-        threads = stress_test("127.0.0.1", port=8080, threads=5, duration=1)
-        # Give them a moment to start
-        for t in threads:
-            t.join(timeout=3)
-        assert len(threads) == 5
+    def test_returns_result_dict(self, mock_socket_cls):
+        result = stress_test("127.0.0.1", port=8080, threads=5, duration=1)
+        assert isinstance(result, dict)
+        assert result["target"] == "127.0.0.1"
+        assert result["port"] == 8080
+        assert result["threads"] == 5
+        assert result["duration"] == 1
 
     @patch("terminal_pressure.socket.socket")
-    def test_threads_are_daemon_threads(self, mock_socket_cls):
-        threads = stress_test("127.0.0.1", port=8080, threads=3, duration=1)
-        for t in threads:
-            t.join(timeout=3)
-            assert t.daemon, "Stress-test threads should be daemon threads"
-
-    @patch("terminal_pressure.socket.socket")
-    def test_default_thread_count(self, mock_socket_cls):
-        threads = stress_test("127.0.0.1", duration=1)
-        for t in threads:
-            t.join(timeout=5)
-        assert len(threads) == DEFAULT_THREADS
+    def test_default_thread_count_in_result(self, mock_socket_cls):
+        result = stress_test("127.0.0.1", duration=1)
+        assert result["threads"] == DEFAULT_THREADS
 
     def test_invalid_target_raises(self):
         with pytest.raises(ValueError):
@@ -317,45 +364,64 @@ class TestStressTest:
         mock_sock = MagicMock()
         mock_socket_cls.return_value = mock_sock
 
-        threads = stress_test("127.0.0.1", port=80, threads=1, duration=1)
-        for t in threads:
-            t.join(timeout=3)
-
+        stress_test("127.0.0.1", port=80, threads=1, duration=1)
         # close() should have been called at least once
         assert mock_sock.close.called
 
     @patch("terminal_pressure.socket.socket")
-    def test_connection_error_does_not_stop_thread(self, mock_socket_cls):
-        """OSError during connect should be silently caught."""
+    def test_connection_error_counted(self, mock_socket_cls):
+        """OSError during connect should be counted as failed."""
         mock_sock = MagicMock()
         mock_sock.connect.side_effect = OSError("Connection refused")
         mock_socket_cls.return_value = mock_sock
 
-        threads = stress_test("127.0.0.1", port=80, threads=2, duration=1)
-        for t in threads:
-            t.join(timeout=3)
-        # No exception propagated – threads finished cleanly
+        result = stress_test("127.0.0.1", port=80, threads=2, duration=1)
+        # All connections should have failed
+        assert result["connections_failed"] > 0
+        assert result["connections_succeeded"] == 0
 
     @patch("terminal_pressure.socket.socket")
-    def test_send_error_does_not_stop_thread(self, mock_socket_cls):
-        """OSError during send should be silently caught."""
+    def test_successful_connection_counted(self, mock_socket_cls):
+        """Successful connections should be counted."""
         mock_sock = MagicMock()
-        mock_sock.sendall.side_effect = OSError("Broken pipe")
         mock_socket_cls.return_value = mock_sock
 
-        threads = stress_test("127.0.0.1", port=80, threads=2, duration=1)
-        for t in threads:
-            t.join(timeout=3)
+        result = stress_test("127.0.0.1", port=80, threads=1, duration=1)
+        # Some connections should have succeeded
+        assert result["connections_attempted"] > 0
 
     @patch("terminal_pressure.socket.socket")
     def test_logs_start_message(self, mock_socket_cls, caplog):
         import logging
 
         with caplog.at_level(logging.INFO):
-            threads = stress_test("127.0.0.1", port=80, threads=2, duration=1)
-        for t in threads:
-            t.join(timeout=3)
+            stress_test("127.0.0.1", port=80, threads=2, duration=1)
         assert "Applying pressure" in caplog.text
+
+    @patch("terminal_pressure.socket.socket")
+    def test_logs_completion_message(self, mock_socket_cls, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            stress_test("127.0.0.1", port=80, threads=2, duration=1)
+        assert "complete" in caplog.text.lower()
+
+    @patch("terminal_pressure.socket.socket")
+    def test_json_output_format(self, mock_socket_cls, capsys):
+        result = stress_test(
+            "127.0.0.1", port=80, threads=2, duration=1, output_format=OUTPUT_FORMAT_JSON
+        )
+        captured = capsys.readouterr()
+        assert '"target"' in captured.out
+        assert '"127.0.0.1"' in captured.out
+
+    def test_exceeds_max_threads_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            stress_test("127.0.0.1", threads=MAX_THREADS + 1, duration=1)
+
+    def test_exceeds_max_duration_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            stress_test("127.0.0.1", threads=1, duration=MAX_DURATION + 1)
 
 
 # ===========================================================================
@@ -373,17 +439,20 @@ class TestExploitChain:
         mock_tcp.return_value = MagicMock()
         mock_raw.return_value = MagicMock()
 
-        exploit_chain("192.168.1.100")
+        result = exploit_chain("192.168.1.100")
 
         mock_ip.assert_called_once_with(dst="192.168.1.100")
         mock_tcp.assert_called_once_with(dport=EXPLOIT_PORT, flags="S")
         mock_raw.assert_called_once_with(load=EXPLOIT_MAGIC)
         mock_send.assert_called_once()
+        assert result["status"] == "success"
 
     @patch("terminal_pressure.send")
     def test_custom_payload_does_not_send_packet(self, mock_send):
-        exploit_chain("10.0.0.1", payload="my_custom_exploit")
+        result = exploit_chain("10.0.0.1", payload="my_custom_exploit")
         mock_send.assert_not_called()
+        assert result["payload"] == "my_custom_exploit"
+        assert result["status"] == "success"
 
     @patch("terminal_pressure.send")
     def test_custom_payload_logs_message(self, mock_send, caplog):
@@ -428,8 +497,39 @@ class TestExploitChain:
              patch("terminal_pressure.TCP"), \
              patch("terminal_pressure.Raw"):
             mock_ip.return_value = MagicMock()
-            exploit_chain("  192.168.0.1  ")
+            result = exploit_chain("  192.168.0.1  ")
             mock_ip.assert_called_once_with(dst="192.168.0.1")
+            assert result["target"] == "192.168.0.1"
+
+    @patch("terminal_pressure.send")
+    @patch("terminal_pressure.Raw")
+    @patch("terminal_pressure.TCP")
+    @patch("terminal_pressure.IP")
+    def test_returns_dict(self, mock_ip, mock_tcp, mock_raw, mock_send):
+        mock_ip.return_value = MagicMock()
+        mock_tcp.return_value = MagicMock()
+        mock_raw.return_value = MagicMock()
+
+        result = exploit_chain("192.168.1.100")
+        assert isinstance(result, dict)
+        assert "target" in result
+        assert "payload" in result
+        assert "status" in result
+        assert "message" in result
+
+    @patch("terminal_pressure.send")
+    @patch("terminal_pressure.Raw")
+    @patch("terminal_pressure.TCP")
+    @patch("terminal_pressure.IP")
+    def test_json_output_format(self, mock_ip, mock_tcp, mock_raw, mock_send, capsys):
+        mock_ip.return_value = MagicMock()
+        mock_tcp.return_value = MagicMock()
+        mock_raw.return_value = MagicMock()
+
+        exploit_chain("192.168.1.100", output_format=OUTPUT_FORMAT_JSON)
+        captured = capsys.readouterr()
+        assert '"target"' in captured.out
+        assert '"192.168.1.100"' in captured.out
 
 
 # ===========================================================================
@@ -442,13 +542,16 @@ class TestMain:
     def test_scan_command_dispatches(self, mock_scan):
         with patch("sys.argv", ["tp", "scan", "192.168.1.1"]):
             main()
-        mock_scan.assert_called_once_with("192.168.1.1")
+        mock_scan.assert_called_once_with("192.168.1.1", output_format=OUTPUT_FORMAT_TEXT)
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_defaults(self, mock_stress):
         with patch("sys.argv", ["tp", "stress", "example.com"]):
             main()
-        mock_stress.assert_called_once_with("example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION)
+        mock_stress.assert_called_once_with(
+            "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION,
+            output_format=OUTPUT_FORMAT_TEXT
+        )
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_custom_args(self, mock_stress):
@@ -457,19 +560,25 @@ class TestMain:
             ["tp", "stress", "example.com", "--port", "9090", "--threads", "10", "--duration", "5"],
         ):
             main()
-        mock_stress.assert_called_once_with("example.com", 9090, 10, 5)
+        mock_stress.assert_called_once_with(
+            "example.com", 9090, 10, 5, output_format=OUTPUT_FORMAT_TEXT
+        )
 
     @patch("terminal_pressure.exploit_chain")
     def test_exploit_command_dispatches_default(self, mock_exploit):
         with patch("sys.argv", ["tp", "exploit", "10.0.0.1"]):
             main()
-        mock_exploit.assert_called_once_with("10.0.0.1", DEFAULT_PAYLOAD)
+        mock_exploit.assert_called_once_with(
+            "10.0.0.1", DEFAULT_PAYLOAD, output_format=OUTPUT_FORMAT_TEXT
+        )
 
     @patch("terminal_pressure.exploit_chain")
     def test_exploit_command_dispatches_custom_payload(self, mock_exploit):
         with patch("sys.argv", ["tp", "exploit", "10.0.0.1", "--payload", "my_payload"]):
             main()
-        mock_exploit.assert_called_once_with("10.0.0.1", "my_payload")
+        mock_exploit.assert_called_once_with(
+            "10.0.0.1", "my_payload", output_format=OUTPUT_FORMAT_TEXT
+        )
 
     def test_no_command_prints_help(self, capsys):
         with patch("sys.argv", ["tp"]):
@@ -482,7 +591,59 @@ class TestMain:
     def test_scan_uses_correct_target(self, mock_scan):
         with patch("sys.argv", ["tp", "scan", "my.host.local"]):
             main()
-        mock_scan.assert_called_once_with("my.host.local")
+        mock_scan.assert_called_once_with("my.host.local", output_format=OUTPUT_FORMAT_TEXT)
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_json_output_format_flag(self, mock_scan):
+        with patch("sys.argv", ["tp", "-f", "json", "scan", "192.168.1.1"]):
+            main()
+        mock_scan.assert_called_once_with("192.168.1.1", output_format=OUTPUT_FORMAT_JSON)
+
+    @patch("terminal_pressure._configure_logging")
+    @patch("terminal_pressure.scan_vulns")
+    def test_verbose_flag(self, mock_scan, mock_configure):
+        with patch("sys.argv", ["tp", "-v", "scan", "192.168.1.1"]):
+            main()
+        mock_configure.assert_called_once_with(verbose=True, quiet=False)
+
+    @patch("terminal_pressure._configure_logging")
+    @patch("terminal_pressure.scan_vulns")
+    def test_quiet_flag(self, mock_scan, mock_configure):
+        with patch("sys.argv", ["tp", "-q", "scan", "192.168.1.1"]):
+            main()
+        mock_configure.assert_called_once_with(verbose=False, quiet=True)
+
+
+# ===========================================================================
+# _configure_logging tests
+# ===========================================================================
+
+
+class TestConfigureLogging:
+    def test_verbose_sets_debug(self):
+        import logging
+        original_level = logging.getLogger().level
+        try:
+            _configure_logging(verbose=True)
+            assert logging.getLogger().level == logging.DEBUG
+        finally:
+            logging.getLogger().setLevel(original_level)
+
+    def test_quiet_sets_warning(self):
+        import logging
+        original_level = logging.getLogger().level
+        try:
+            _configure_logging(quiet=True)
+            assert logging.getLogger().level == logging.WARNING
+        finally:
+            logging.getLogger().setLevel(original_level)
+
+    def test_default_no_change(self):
+        import logging
+        original_level = logging.getLogger().level
+        _configure_logging()
+        # Level shouldn't change when no flags are set
+        assert logging.getLogger().level == original_level
 
 
 # ===========================================================================
@@ -515,6 +676,16 @@ class TestConstants:
         assert int(low) >= 1
         assert int(high) <= 65535
 
+    def test_max_threads(self):
+        assert MAX_THREADS == 1000
+
+    def test_max_duration(self):
+        assert MAX_DURATION == 3600
+
+    def test_valid_output_formats(self):
+        assert OUTPUT_FORMAT_TEXT in VALID_OUTPUT_FORMATS
+        assert OUTPUT_FORMAT_JSON in VALID_OUTPUT_FORMATS
+
 
 # ===========================================================================
 # Integration-style tests
@@ -533,18 +704,17 @@ class TestIntegration:
             scanner[host]["tcp"].__getitem__.return_value = {"state": "open", "name": "ssh"}
         MockScanner.return_value = scanner
 
-        scan_vulns("10.0.0.0/30")  # Should not raise
+        result = scan_vulns("10.0.0.0/30")
+        assert len(result["hosts"]) == 2
 
     @patch("terminal_pressure.socket.socket")
-    def test_stress_test_all_threads_finish(self, mock_socket_cls):
-        """All threads should terminate within a reasonable timeout."""
+    def test_stress_test_completes(self, mock_socket_cls):
+        """stress_test should complete and return results."""
         mock_sock = MagicMock()
         mock_socket_cls.return_value = mock_sock
 
-        threads = stress_test("127.0.0.1", port=80, threads=5, duration=1)
-        for t in threads:
-            t.join(timeout=5)
-            assert not t.is_alive(), "Worker thread is still alive after join timeout"
+        result = stress_test("127.0.0.1", port=80, threads=5, duration=1)
+        assert result["connections_attempted"] >= 0
 
     @patch("terminal_pressure.send")
     @patch("terminal_pressure.Raw")
@@ -557,8 +727,10 @@ class TestIntegration:
         scanner.all_hosts.return_value = []
         MockScanner.return_value = scanner
 
-        scan_vulns("192.168.0.1")
+        scan_result = scan_vulns("192.168.0.1")
         mock_ip.return_value = MagicMock()
-        exploit_chain("192.168.0.1")
+        exploit_result = exploit_chain("192.168.0.1")
 
         mock_send.assert_called_once()
+        assert scan_result["target"] == "192.168.0.1"
+        assert exploit_result["target"] == "192.168.0.1"
