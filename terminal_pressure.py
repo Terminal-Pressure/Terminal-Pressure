@@ -53,6 +53,11 @@ MAX_TIMEOUT: float = 300.0  # 5 minutes max
 DEFAULT_RETRIES: int = 0
 MAX_RETRIES: int = 10
 
+# Rate limiting
+MIN_RATE_LIMIT: int = 1  # At least 1 connection per second per thread
+MAX_RATE_LIMIT: int = 10000  # Max connections per second per thread
+DEFAULT_RATE_LIMIT: int = 0  # 0 means unlimited
+
 # Output format options
 OUTPUT_FORMAT_TEXT: str = "text"
 OUTPUT_FORMAT_JSON: str = "json"
@@ -214,6 +219,27 @@ def _validate_retries(retries: int) -> int:
     return retries
 
 
+def _validate_rate_limit(rate_limit: int) -> int:
+    """Validate that the rate limit is within acceptable bounds.
+
+    Args:
+        rate_limit: Connections per second per thread (0 = unlimited).
+
+    Returns:
+        The validated rate limit value.
+
+    Raises:
+        ValueError: If *rate_limit* is invalid.
+    """
+    if not isinstance(rate_limit, int) or rate_limit < 0:
+        raise ValueError(f"Rate limit must be a non-negative integer, got {rate_limit!r}.")
+    if rate_limit != 0 and rate_limit < MIN_RATE_LIMIT:
+        raise ValueError(f"Rate limit must be at least {MIN_RATE_LIMIT}, got {rate_limit}.")
+    if rate_limit > MAX_RATE_LIMIT:
+        raise ValueError(f"Rate limit {rate_limit} exceeds maximum ({MAX_RATE_LIMIT}).")
+    return rate_limit
+
+
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
@@ -349,6 +375,7 @@ def stress_test(
     output_format: str = OUTPUT_FORMAT_TEXT,
     timeout: float = SOCKET_TIMEOUT,
     retries: int = DEFAULT_RETRIES,
+    rate_limit: int = DEFAULT_RATE_LIMIT,
 ) -> dict[str, Any]:
     """Simulate a connection-flood stress test against *target*:*port*.
 
@@ -368,6 +395,7 @@ def stress_test(
         output_format: Output format ('text', 'json', or 'csv'). Default: 'text'.
         timeout: Socket timeout in seconds (default: 5.0, range: 0.1-300).
         retries: Number of retries for failed connections (default: 0, max: 10).
+        rate_limit: Max connections per second per thread (default: 0 = unlimited, max: 10000).
 
     Returns:
         A dictionary containing stress test results with keys:
@@ -377,6 +405,7 @@ def stress_test(
         - 'duration': Duration in seconds
         - 'timeout': Socket timeout used
         - 'retries': Number of retries configured
+        - 'rate_limit': Rate limit used
         - 'actual_duration_seconds': Actual elapsed time
         - 'connections_attempted': Total connection attempts
         - 'connections_succeeded': Successful connections
@@ -398,10 +427,11 @@ def stress_test(
     output_format = _validate_output_format(output_format)
     timeout = _validate_timeout(timeout)
     retries = _validate_retries(retries)
+    rate_limit = _validate_rate_limit(rate_limit)
 
     logger.info(
-        "Applying pressure to %s:%d with %d threads for %ds (timeout=%.1fs, retries=%d)",
-        target, port, threads, duration, timeout, retries
+        "Applying pressure to %s:%d with %d threads for %ds (timeout=%.1fs, retries=%d, rate_limit=%d)",
+        target, port, threads, duration, timeout, retries, rate_limit
     )
 
     start_time = time.time()
@@ -409,6 +439,9 @@ def stress_test(
     # Thread-safe counters
     stats_lock = threading.Lock()
     stats = {"attempted": 0, "succeeded": 0, "failed": 0, "retried": 0}
+
+    # Calculate delay between connections for rate limiting
+    delay_between_connections = 1.0 / rate_limit if rate_limit > 0 else 0
 
     def flood() -> None:
         """Inner worker: open, send, close in a tight loop until time is up."""
@@ -422,6 +455,7 @@ def stress_test(
             while remaining_attempts > 0 and not success and current_time < end_time:
                 attempt_number += 1
                 sock: Optional[socket.socket] = None
+                connection_start = time.time()
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(timeout)
@@ -450,6 +484,12 @@ def stress_test(
                             pass
                 current_time = time.time()
 
+                # Rate limiting: wait if needed to maintain rate
+                if delay_between_connections > 0:
+                    elapsed = current_time - connection_start
+                    if elapsed < delay_between_connections:
+                        time.sleep(delay_between_connections - elapsed)
+
     started: list[threading.Thread] = []
     for _ in range(threads):
         t = threading.Thread(target=flood, daemon=True)
@@ -472,6 +512,7 @@ def stress_test(
         "duration": duration,
         "timeout": timeout,
         "retries": retries,
+        "rate_limit": rate_limit,
         "actual_duration_seconds": round(actual_duration, 2),
         "connections_attempted": stats["attempted"],
         "connections_succeeded": stats["succeeded"],
@@ -689,6 +730,12 @@ def main() -> int:
         default=DEFAULT_RETRIES,
         help=f"Retries for failed connections (default: {DEFAULT_RETRIES}, max: {MAX_RETRIES})",
     )
+    stress_parser.add_argument(
+        "--rate-limit",
+        type=int,
+        default=DEFAULT_RATE_LIMIT,
+        help=f"Max connections/second per thread (default: {DEFAULT_RATE_LIMIT} = unlimited, max: {MAX_RATE_LIMIT})",
+    )
 
     # -- exploit sub-command
     exploit_parser = subparsers.add_parser("exploit", help="Exploit chain (advanced)")
@@ -714,6 +761,7 @@ def main() -> int:
                 output_format=args.output_format,
                 timeout=args.timeout,
                 retries=args.retries,
+                rate_limit=args.rate_limit,
             )
         elif args.command == "exploit":
             exploit_chain(args.target, args.payload, output_format=args.output_format)

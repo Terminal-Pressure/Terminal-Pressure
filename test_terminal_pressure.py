@@ -27,6 +27,7 @@ from terminal_pressure import (
     DEFAULT_DURATION,
     DEFAULT_PAYLOAD,
     DEFAULT_PORT,
+    DEFAULT_RATE_LIMIT,
     DEFAULT_RETRIES,
     DEFAULT_THREADS,
     EXIT_ERROR,
@@ -35,9 +36,11 @@ from terminal_pressure import (
     EXPLOIT_MAGIC,
     EXPLOIT_PORT,
     MAX_DURATION,
+    MAX_RATE_LIMIT,
     MAX_RETRIES,
     MAX_THREADS,
     MAX_TIMEOUT,
+    MIN_RATE_LIMIT,
     MIN_TIMEOUT,
     OUTPUT_FORMAT_CSV,
     OUTPUT_FORMAT_JSON,
@@ -53,6 +56,7 @@ from terminal_pressure import (
     _validate_duration,
     _validate_output_format,
     _validate_port,
+    _validate_rate_limit,
     _validate_retries,
     _validate_target,
     _validate_threads,
@@ -285,6 +289,37 @@ class TestValidateRetries:
     def test_non_int_raises(self):
         with pytest.raises(ValueError):
             _validate_retries(3.5)  # type: ignore
+
+
+# ===========================================================================
+# _validate_rate_limit
+# ===========================================================================
+
+
+class TestValidateRateLimit:
+    def test_valid_rate_limit(self):
+        assert _validate_rate_limit(100) == 100
+
+    def test_zero_rate_limit_unlimited(self):
+        assert _validate_rate_limit(0) == 0
+
+    def test_min_rate_limit(self):
+        assert _validate_rate_limit(MIN_RATE_LIMIT) == MIN_RATE_LIMIT
+
+    def test_max_rate_limit(self):
+        assert _validate_rate_limit(MAX_RATE_LIMIT) == MAX_RATE_LIMIT
+
+    def test_negative_raises(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            _validate_rate_limit(-1)
+
+    def test_above_max_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            _validate_rate_limit(MAX_RATE_LIMIT + 1)
+
+    def test_non_int_raises(self):
+        with pytest.raises(ValueError):
+            _validate_rate_limit(3.5)  # type: ignore
 
 
 # ===========================================================================
@@ -579,6 +614,39 @@ class TestStressTest:
         # Should have retries counted
         assert result["connections_retried"] >= 0
 
+    @patch("terminal_pressure.socket.socket")
+    def test_socket_close_error_handled(self, mock_socket_cls):
+        """Test that OSError during socket close is handled gracefully."""
+        mock_sock = MagicMock()
+        mock_sock.close.side_effect = OSError("Socket already closed")
+        mock_socket_cls.return_value = mock_sock
+
+        # Should not raise - OSError during close is silently handled
+        result = stress_test("127.0.0.1", port=80, threads=1, duration=1)
+        assert result["connections_attempted"] > 0
+
+    @patch("terminal_pressure.socket.socket")
+    def test_rate_limit_in_result(self, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, rate_limit=100)
+        assert result["rate_limit"] == 100
+
+    @patch("terminal_pressure.socket.socket")
+    def test_rate_limit_zero_means_unlimited(self, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+        result = stress_test("127.0.0.1", port=80, threads=1, duration=1, rate_limit=0)
+        assert result["rate_limit"] == 0
+
+    def test_invalid_rate_limit_raises(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            stress_test("127.0.0.1", port=80, threads=1, duration=1, rate_limit=-1)
+
+    def test_exceeds_max_rate_limit_raises(self):
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            stress_test("127.0.0.1", port=80, threads=1, duration=1, rate_limit=MAX_RATE_LIMIT + 1)
+
 
 # ===========================================================================
 # exploit_chain()
@@ -739,6 +807,7 @@ class TestMain:
             output_format=OUTPUT_FORMAT_TEXT,
             timeout=SOCKET_TIMEOUT,
             retries=DEFAULT_RETRIES,
+            rate_limit=DEFAULT_RATE_LIMIT,
         )
 
     @patch("terminal_pressure.stress_test")
@@ -750,7 +819,7 @@ class TestMain:
             main()
         mock_stress.assert_called_once_with(
             "example.com", 9090, 10, 5, output_format=OUTPUT_FORMAT_TEXT,
-            timeout=SOCKET_TIMEOUT, retries=DEFAULT_RETRIES,
+            timeout=SOCKET_TIMEOUT, retries=DEFAULT_RETRIES, rate_limit=DEFAULT_RATE_LIMIT,
         )
 
     @patch("terminal_pressure.stress_test")
@@ -762,7 +831,20 @@ class TestMain:
             main()
         mock_stress.assert_called_once_with(
             "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION,
-            output_format=OUTPUT_FORMAT_TEXT, timeout=10.0, retries=3,
+            output_format=OUTPUT_FORMAT_TEXT, timeout=10.0, retries=3, rate_limit=DEFAULT_RATE_LIMIT,
+        )
+
+    @patch("terminal_pressure.stress_test")
+    def test_stress_command_dispatches_rate_limit(self, mock_stress):
+        with patch(
+            "sys.argv",
+            ["tp", "stress", "example.com", "--rate-limit", "500"],
+        ):
+            main()
+        mock_stress.assert_called_once_with(
+            "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION,
+            output_format=OUTPUT_FORMAT_TEXT, timeout=SOCKET_TIMEOUT, retries=DEFAULT_RETRIES,
+            rate_limit=500,
         )
 
     @patch("terminal_pressure.exploit_chain")
@@ -944,6 +1026,11 @@ class TestConstants:
     def test_socket_timeout_default(self):
         assert SOCKET_TIMEOUT == 5.0
 
+    def test_rate_limit_constants(self):
+        assert DEFAULT_RATE_LIMIT == 0
+        assert MIN_RATE_LIMIT == 1
+        assert MAX_RATE_LIMIT == 10000
+
 
 # ===========================================================================
 # Integration-style tests
@@ -992,3 +1079,25 @@ class TestIntegration:
         mock_send.assert_called_once()
         assert scan_result["target"] == "192.168.0.1"
         assert exploit_result["target"] == "192.168.0.1"
+
+
+# ===========================================================================
+# Module entry point
+# ===========================================================================
+
+
+class TestModuleEntryPoint:
+    def test_module_runs_main(self):
+        """Test that main() correctly invokes commands and returns exit codes."""
+        with patch("terminal_pressure.scan_vulns") as mock_scan:
+            mock_scan.return_value = {"target": "127.0.0.1", "hosts": []}
+            with patch("sys.argv", ["tp", "scan", "127.0.0.1"]):
+                result = main()
+                assert result == EXIT_SUCCESS
+            mock_scan.assert_called_once()
+
+    def test_main_returns_exit_codes(self):
+        """Test that main returns proper exit codes."""
+        with patch("sys.argv", ["tp"]):
+            result = main()
+            assert result == EXIT_SUCCESS  # No command prints help and returns success

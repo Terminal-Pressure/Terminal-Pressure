@@ -76,6 +76,7 @@ python terminal_pressure.py exploit 192.168.1.1 --payload custom_payload
 | `--duration` | Duration in seconds | 60 | 1-3600 |
 | `--timeout` | Socket timeout in seconds | 5.0 | 0.1-300 |
 | `--retries` | Retries for failed connections | 0 | 0-10 |
+| `--rate-limit` | Max connections/second/thread | 0 (unlimited) | 0-10000 |
 
 ### Output Formats
 
@@ -85,6 +86,9 @@ python terminal_pressure.py -f json scan 192.168.1.1
 
 # CSV output (for spreadsheets/automation)
 python terminal_pressure.py -f csv stress localhost --port 8080 --threads 10 --duration 5
+
+# Rate-limited stress test (100 connections/second per thread)
+python terminal_pressure.py stress localhost --rate-limit 100 --threads 5
 ```
 
 **Example JSON Output (stress test):**
@@ -96,6 +100,7 @@ python terminal_pressure.py -f csv stress localhost --port 8080 --threads 10 --d
   "duration": 5,
   "timeout": 5.0,
   "retries": 0,
+  "rate_limit": 0,
   "actual_duration_seconds": 5.02,
   "connections_attempted": 1523,
   "connections_succeeded": 1520,
@@ -127,13 +132,13 @@ Performs nmap vulnerability scan against target.
 
 **Returns:** `dict` with keys: `target`, `hosts`, `scan_time_seconds`
 
-### `stress_test(target, port=80, threads=50, duration=60, output_format="text", timeout=5.0, retries=0)`
+### `stress_test(target, port=80, threads=50, duration=60, output_format="text", timeout=5.0, retries=0, rate_limit=0)`
 
 Runs connection-flood stress test against target.
 
-**Safety Limits:** max 1000 threads, max 3600 seconds duration, max 300s timeout, max 10 retries
+**Safety Limits:** max 1000 threads, max 3600 seconds duration, max 300s timeout, max 10 retries, max 10000 rate limit
 
-**Returns:** `dict` with keys: `target`, `port`, `threads`, `duration`, `timeout`, `retries`, `actual_duration_seconds`, `connections_attempted`, `connections_succeeded`, `connections_failed`, `connections_retried`, `connections_per_second`
+**Returns:** `dict` with keys: `target`, `port`, `threads`, `duration`, `timeout`, `retries`, `rate_limit`, `actual_duration_seconds`, `connections_attempted`, `connections_succeeded`, `connections_failed`, `connections_retried`, `connections_per_second`
 
 ### `exploit_chain(target, payload="default_backdoor", output_format="text")`
 
@@ -155,8 +160,8 @@ pytest test_terminal_pressure.py
 
 ### Test Coverage
 
-- **142 tests** covering all functions and edge cases
-- **99% branch coverage**
+- **158 tests** covering all functions and edge cases
+- **98% branch coverage**
 - All external dependencies mocked (no real network traffic in tests)
 
 ## Architecture
