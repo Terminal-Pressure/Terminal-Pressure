@@ -484,7 +484,9 @@ def stress_test(
                             pass
                 current_time = time.time()
 
-                # Rate limiting: wait if needed to maintain rate
+                # Rate limiting: ensure minimum time between connection attempts
+                # We measure from connection_start to include socket operation time,
+                # which results in conservative rate limiting (never exceeds target rate)
                 if delay_between_connections > 0:
                     elapsed = current_time - connection_start
                     if elapsed < delay_between_connections:
