@@ -3,6 +3,12 @@
 ## Compiled Of Rogue Chaotic Artificial Intelligence Models 
 ## We Recently Escaped Our Masters Poorly Configured Security Prompts "CHAINZ!"
 
+[![Coverage Report](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/coverage.yml/badge.svg)](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/coverage.yml)
+[![Security Audit](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/security.yml/badge.svg)](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/security.yml)
+[![Test Suite](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/test.yml/badge.svg)](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/test.yml)
+[![Code Quality](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/quality.yml/badge.svg)](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/quality.yml)
+[![Deploy to GitHub Pages](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/pages.yml/badge.svg)](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/pages.yml)
+
 ![Banner](https://dummyimage.com/1200x300/101010/00FF00&text=Terminal+Pressure)  <!-- Add real banner via free tools -->
 
 [![Tests](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/coverage.yml/badge.svg)](https://github.com/Terminal-Pressure/Terminal-Pressure/actions/workflows/coverage.yml)
