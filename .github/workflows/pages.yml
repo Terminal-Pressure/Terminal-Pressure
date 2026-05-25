@@ -45,10 +45,12 @@ jobs:
         fi
         mkdocs build
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+    - name: Configure GitHub Pages
+      uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5
+
+    - name: Upload Pages artifact
+      uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3
       with:
-        name: github-pages
         path: site/
 
   deploy:
