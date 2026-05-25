@@ -11,6 +11,12 @@ Usage:
     python terminal_pressure.py scan <target> [--format json|csv|text]
     python terminal_pressure.py stress <target> [--port PORT] [--threads N] [--duration SECS]
     python terminal_pressure.py exploit <target> [--payload PAYLOAD]
+    python terminal_pressure.py list-plugins
+    python terminal_pressure.py run-plugin <name> [--target T] [options]
+    python terminal_pressure.py mcp-server
+    python terminal_pressure.py providers
+    python terminal_pressure.py hf-analyze <target> [--model M] [--timeout T]
+    python terminal_pressure.py modal-scan <target> [--format F]
     python terminal_pressure.py version
 """
 
@@ -22,19 +28,36 @@ import json
 import logging
 import re
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
-# External dependencies (pip install python-nmap scapy)
+# External dependencies (pip install python-nmap scapy requests)
 import nmap
 from scapy.all import IP, TCP, Raw, send  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
+# Optional provider dependencies (graceful degradation when absent)
+# ---------------------------------------------------------------------------
+try:
+    import requests as _requests  # type: ignore[import]
+    _REQUESTS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _REQUESTS_AVAILABLE = False
+
+try:
+    import modal as _modal  # type: ignore[import]
+    _MODAL_AVAILABLE = True
+except ImportError:
+    _modal = None  # type: ignore[assignment]
+    _MODAL_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
 # Version Info
 # ---------------------------------------------------------------------------
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 __author__ = "Terminal Pressure Labs"
 
 # ---------------------------------------------------------------------------
@@ -56,6 +79,11 @@ DNS_TIMEOUT: float = 5.0
 OUTPUT_TEXT: str = "text"
 OUTPUT_JSON: str = "json"
 OUTPUT_CSV: str = "csv"
+
+# Hugging Face provider constants
+HF_DEFAULT_MODEL: str = "mistralai/Mistral-7B-Instruct-v0.1"
+HF_API_BASE: str = "https://api-inference.huggingface.co"
+HF_DEFAULT_TIMEOUT: float = 30.0
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -590,6 +618,499 @@ def exploit_chain(target: str, payload: str = DEFAULT_PAYLOAD) -> ExploitResult:
 
 
 # ---------------------------------------------------------------------------
+# Plugin system
+# ---------------------------------------------------------------------------
+
+class PluginBase:
+    """Base class for Terminal Pressure plugins.
+
+    Subclass this and implement :meth:`run` to create a plugin.  Register the
+    instance with :func:`register_plugin` to make it discoverable.
+    """
+
+    name: str = ""
+    description: str = ""
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        """Return a JSON Schema dict describing the ``run`` keyword arguments."""
+        return {"type": "object", "properties": {}, "required": []}
+
+    def run(self, **kwargs: Any) -> dict[str, Any]:
+        """Execute the plugin.  Must be overridden by subclasses.
+
+        Args:
+            **kwargs: Plugin-specific arguments (see :attr:`input_schema`).
+
+        Returns:
+            A JSON-serialisable dict with the plugin result.
+
+        Raises:
+            NotImplementedError: If the subclass has not overridden this method.
+        """
+        raise NotImplementedError(f"Plugin {self.name!r} must implement run()")
+
+
+_PLUGIN_REGISTRY: dict[str, PluginBase] = {}
+
+
+def register_plugin(plugin: PluginBase) -> None:
+    """Register a plugin instance in the global registry.
+
+    Args:
+        plugin: An instance of a :class:`PluginBase` subclass with a non-empty
+            :attr:`~PluginBase.name`.
+
+    Raises:
+        ValueError: If the plugin has no name.
+    """
+    if not plugin.name:
+        raise ValueError("Plugin must have a non-empty name.")
+    _PLUGIN_REGISTRY[plugin.name] = plugin
+    logger.debug("Plugin registered: %s", plugin.name)
+
+
+def get_plugin(name: str) -> PluginBase:
+    """Retrieve a registered plugin by name.
+
+    Args:
+        name: The plugin name.
+
+    Returns:
+        The registered :class:`PluginBase` instance.
+
+    Raises:
+        KeyError: If no plugin with *name* is registered.
+    """
+    if name not in _PLUGIN_REGISTRY:
+        available = list(_PLUGIN_REGISTRY)
+        raise KeyError(
+            f"Plugin {name!r} not found. Available plugins: {available}"
+        )
+    return _PLUGIN_REGISTRY[name]
+
+
+def list_plugins() -> list[PluginBase]:
+    """Return all registered plugins in registration order.
+
+    Returns:
+        List of :class:`PluginBase` instances.
+    """
+    return list(_PLUGIN_REGISTRY.values())
+
+
+class ScanPlugin(PluginBase):
+    """Plugin wrapper around :func:`scan_vulns`."""
+
+    name = "scan"
+    description = "Vulnerability scan using nmap"
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target IP/hostname/CIDR"},
+                "output_format": {
+                    "type": "string",
+                    "enum": [OUTPUT_TEXT, OUTPUT_JSON, OUTPUT_CSV],
+                    "description": "Output format (default: text)",
+                },
+            },
+            "required": ["target"],
+        }
+
+    def run(self, target: str = "", output_format: str = OUTPUT_TEXT, **_: Any) -> dict[str, Any]:  # type: ignore[override]
+        result = scan_vulns(target, output_format)
+        return result.to_dict()
+
+
+class StressPlugin(PluginBase):
+    """Plugin wrapper around :func:`stress_test`."""
+
+    name = "stress"
+    description = "Connection-flood stress test simulation"
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target IP/hostname"},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                "threads": {"type": "integer", "minimum": 1, "maximum": MAX_THREADS},
+                "duration": {"type": "integer", "minimum": 1, "maximum": MAX_DURATION},
+            },
+            "required": ["target"],
+        }
+
+    def run(  # type: ignore[override]
+        self,
+        target: str = "",
+        port: int = DEFAULT_PORT,
+        threads: int = DEFAULT_THREADS,
+        duration: int = DEFAULT_DURATION,
+        **_: Any,
+    ) -> dict[str, Any]:
+        worker_threads = stress_test(target, port, threads, duration)
+        return {
+            "target": target,
+            "port": port,
+            "threads_started": len(worker_threads),
+            "duration": duration,
+            "status": "running",
+        }
+
+
+class ExploitPlugin(PluginBase):
+    """Plugin wrapper around :func:`exploit_chain`."""
+
+    name = "exploit"
+    description = "Exploit chain simulation"
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target IP/hostname"},
+                "payload": {
+                    "type": "string",
+                    "description": "Payload identifier (default: default_backdoor)",
+                },
+            },
+            "required": ["target"],
+        }
+
+    def run(self, target: str = "", payload: str = DEFAULT_PAYLOAD, **_: Any) -> dict[str, Any]:  # type: ignore[override]
+        result = exploit_chain(target, payload)
+        return result.to_dict()
+
+
+# Register built-in plugins
+register_plugin(ScanPlugin())
+register_plugin(StressPlugin())
+register_plugin(ExploitPlugin())
+
+
+# ---------------------------------------------------------------------------
+# MCP (Model Context Protocol) stdio server
+# ---------------------------------------------------------------------------
+
+def _handle_mcp_request(request: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Process a single MCP JSON-RPC 2.0 request dict and return the response.
+
+    Implements the Model Context Protocol (MCP) subset required for tool
+    discovery and invocation:
+
+    * ``initialize``              – negotiate protocol version & capabilities
+    * ``notifications/initialized`` – client notification (no response)
+    * ``tools/list``              – enumerate registered plugins as MCP tools
+    * ``tools/call``              – invoke a plugin by name
+
+    Args:
+        request: Parsed JSON-RPC 2.0 request dict.
+
+    Returns:
+        Response dict, or ``None`` for notifications that require no reply.
+    """
+    req_id = request.get("id")
+    method = request.get("method", "")
+    params: dict[str, Any] = request.get("params") or {}
+
+    # Notifications have no ``id`` – send no response
+    if req_id is None and method.startswith("notifications/"):
+        return None
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "terminal-pressure", "version": __version__},
+            },
+        }
+
+    if method == "tools/list":
+        tools = [
+            {
+                "name": p.name,
+                "description": p.description,
+                "inputSchema": p.input_schema,
+            }
+            for p in list_plugins()
+        ]
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools}}
+
+    if method == "tools/call":
+        tool_name: str = params.get("name", "")
+        arguments: dict[str, Any] = params.get("arguments") or {}
+        try:
+            plugin = get_plugin(tool_name)
+            result = plugin.run(**arguments)
+            text = json.dumps(result, indent=2)
+            is_error = False
+        except (KeyError, ValueError, TypeError) as exc:
+            text = str(exc)
+            is_error = True
+        except Exception as exc:  # pragma: no cover – unexpected plugin errors
+            text = str(exc)
+            is_error = True
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": is_error,
+            },
+        }
+
+    # Unknown method
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": f"Method not found: {method!r}"},
+    }
+
+
+def run_mcp_server(
+    input_stream: Any = None,
+    output_stream: Any = None,
+) -> None:
+    """Run the MCP stdio server.
+
+    Reads newline-delimited JSON-RPC 2.0 requests from *input_stream*
+    (defaults to ``sys.stdin``) and writes responses to *output_stream*
+    (defaults to ``sys.stdout``).  Runs until the input stream is closed.
+
+    Args:
+        input_stream: Readable text stream.  Defaults to ``sys.stdin``.
+        output_stream: Writable text stream.  Defaults to ``sys.stdout``.
+    """
+    if input_stream is None:
+        input_stream = sys.stdin
+    if output_stream is None:
+        output_stream = sys.stdout
+
+    logger.info("Terminal Pressure MCP server started (stdio mode, v%s)", __version__)
+
+    for raw_line in input_stream:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as exc:
+            error_resp: dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {exc}"},
+            }
+            output_stream.write(json.dumps(error_resp) + "\n")
+            output_stream.flush()
+            continue
+
+        response = _handle_mcp_request(request)
+        if response is not None:
+            output_stream.write(json.dumps(response) + "\n")
+            output_stream.flush()
+
+    logger.info("Terminal Pressure MCP server stopped")
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face provider
+# ---------------------------------------------------------------------------
+
+class HuggingFaceProvider:
+    """Optional Hugging Face Inference API provider for AI-enriched analysis.
+
+    Requires the ``requests`` library and a ``HF_TOKEN`` environment variable.
+    The provider degrades gracefully: ``available`` returns ``False`` when
+    either precondition is unmet.
+
+    Environment variables:
+        HF_TOKEN:   Hugging Face API token (required).
+        HF_API_URL: Override the Inference API base URL (optional).
+
+    Examples:
+        >>> hf = HuggingFaceProvider()
+        >>> if hf.available:
+        ...     analysis = hf.analyze("Summarise: hello world")  # doctest: +SKIP
+    """
+
+    def __init__(self) -> None:
+        import os as _os2
+        self._token: str = _os2.environ.get("HF_TOKEN", "")
+        self._api_url: str = _os2.environ.get("HF_API_URL", HF_API_BASE)
+
+    @property
+    def available(self) -> bool:
+        """``True`` when ``requests`` is installed and ``HF_TOKEN`` is set."""
+        return _REQUESTS_AVAILABLE and bool(self._token)
+
+    def analyze(
+        self,
+        text: str,
+        model: str = HF_DEFAULT_MODEL,
+        timeout: float = HF_DEFAULT_TIMEOUT,
+    ) -> dict[str, Any]:
+        """Send *text* to the Hugging Face Inference API and return the result.
+
+        Args:
+            text: The input text to send to the model.
+            model: Hugging Face model ID (default: ``HF_DEFAULT_MODEL``).
+            timeout: Request timeout in seconds (default: ``HF_DEFAULT_TIMEOUT``).
+
+        Returns:
+            Dict with keys ``model``, ``response``, and ``status``.
+
+        Raises:
+            RuntimeError: If ``requests`` is not installed, ``HF_TOKEN`` is
+                missing, or the API call fails.
+        """
+        if not _REQUESTS_AVAILABLE:  # pragma: no cover
+            raise RuntimeError(
+                "requests library is required for HuggingFace provider. "
+                "Run: pip install requests"
+            )
+        if not self._token:
+            raise RuntimeError(
+                "HF_TOKEN environment variable is not set. "
+                "Obtain a token at https://huggingface.co/settings/tokens"
+            )
+
+        headers = {"Authorization": f"Bearer {self._token}"}
+        payload = {"inputs": text}
+        url = f"{self._api_url}/models/{model}"
+
+        try:
+            resp = _requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            return {"model": model, "response": resp.json(), "status": "ok"}
+        except _requests.exceptions.Timeout:
+            raise RuntimeError(
+                f"HuggingFace API request timed out after {timeout}s"
+            )
+        except _requests.exceptions.HTTPError as exc:
+            raise RuntimeError(f"HuggingFace API HTTP error: {exc}")
+        except _requests.exceptions.RequestException as exc:
+            raise RuntimeError(f"HuggingFace request failed: {exc}")
+
+    def analyze_scan(
+        self,
+        scan_result: "ScanResult",
+        model: str = HF_DEFAULT_MODEL,
+        timeout: float = HF_DEFAULT_TIMEOUT,
+    ) -> dict[str, Any]:
+        """Analyze a :class:`ScanResult` with the Hugging Face Inference API.
+
+        Serialises the scan result to JSON and sends it to the model with a
+        security-analysis prompt.
+
+        Args:
+            scan_result: The scan result to analyse.
+            model: Hugging Face model ID.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            Dict with keys ``model``, ``response``, and ``status``.
+        """
+        summary = scan_result.to_json()
+        prompt = (
+            "Analyze this network vulnerability scan and summarize the security risks:\n"
+            + summary
+        )
+        return self.analyze(prompt, model=model, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Modal provider
+# ---------------------------------------------------------------------------
+
+class ModalProvider:
+    """Optional Modal cloud provider for running scans on remote infrastructure.
+
+    Requires the ``modal`` package (``pip install modal``) and a configured
+    Modal account (``modal auth login``).  The provider degrades gracefully:
+    ``available`` returns ``False`` when the package is not installed.
+
+    Examples:
+        >>> mp = ModalProvider()
+        >>> if mp.available:
+        ...     result = mp.run_scan("192.168.1.1")  # doctest: +SKIP
+    """
+
+    @property
+    def available(self) -> bool:
+        """``True`` when the ``modal`` package is installed."""
+        return _MODAL_AVAILABLE
+
+    def run_scan(
+        self,
+        target: str,
+        output_format: str = OUTPUT_TEXT,
+        timeout: int = 300,
+    ) -> dict[str, Any]:
+        """Run a vulnerability scan on Modal cloud infrastructure.
+
+        Args:
+            target: IP address, CIDR notation, or hostname of the scan target.
+            output_format: Output format ("text", "json", or "csv").
+            timeout: Maximum seconds to allow the remote function to run.
+
+        Returns:
+            Dict containing scan results with an additional ``"provider": "modal"``
+            key.
+
+        Raises:
+            RuntimeError: If ``modal`` is not installed, authentication fails,
+                or the remote execution raises an error.
+        """
+        if not _MODAL_AVAILABLE:
+            raise RuntimeError(
+                "modal package is not installed. "
+                "Run: pip install modal  then  modal auth login"
+            )
+
+        target = _validate_target(target)
+        output_format = _validate_output_format(output_format)
+
+        logger.info("Submitting scan job to Modal cloud for target: %s", target)
+
+        try:
+            app = _modal.App("terminal-pressure-scan")
+
+            @app.function(timeout=timeout)
+            def _remote_scan(t: str, fmt: str) -> str:
+                """Remote Modal function: runs nmap scan in Modal's cloud."""
+                import nmap as _nmap  # noqa: F401 – available in Modal image
+                import json as _json
+                import time as _time
+
+                _scanner = _nmap.PortScanner()
+                _start = _time.time()
+                _scanner.scan(t, "1-1024", "-sV --script vuln")
+                _elapsed = _time.time() - _start
+                return _json.dumps({
+                    "target": t,
+                    "hosts": _scanner.all_hosts(),
+                    "scan_time": _elapsed,
+                    "provider": "modal",
+                })
+
+            with app.run():
+                result_str: str = _remote_scan.remote(target, output_format)
+
+            return json.loads(result_str)
+        except Exception as exc:
+            logger.error("Modal scan failed: %s", exc)
+            raise RuntimeError(f"Modal scan failed: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -597,10 +1118,16 @@ def main() -> None:
     """Parse CLI arguments and dispatch to the appropriate function.
 
     Sub-commands:
-        scan    – vulnerability scan via nmap.
-        stress  – connection-flood stress test.
-        exploit – exploit-chain simulation.
-        version – display version information.
+        scan         – vulnerability scan via nmap.
+        stress       – connection-flood stress test.
+        exploit      – exploit-chain simulation.
+        list-plugins – list registered plugins.
+        run-plugin   – run a named plugin.
+        mcp-server   – start the MCP stdio server.
+        providers    – show provider availability.
+        hf-analyze   – scan + AI analysis via Hugging Face.
+        modal-scan   – run a scan on Modal cloud infrastructure.
+        version      – display version information.
 
     If no sub-command is provided, the help text is printed.
     """
@@ -651,17 +1178,140 @@ def main() -> None:
         "--payload", type=str, default=DEFAULT_PAYLOAD, help="Payload type"
     )
 
+    # -- list-plugins sub-command
+    subparsers.add_parser("list-plugins", help="List registered plugins")
+
+    # -- run-plugin sub-command
+    run_plugin_parser = subparsers.add_parser("run-plugin", help="Run a named plugin")
+    run_plugin_parser.add_argument("plugin_name", type=str, help="Plugin name")
+    run_plugin_parser.add_argument("--target", type=str, default="", help="Target")
+    run_plugin_parser.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help="Port (stress plugin)"
+    )
+    run_plugin_parser.add_argument(
+        "--threads", type=int, default=DEFAULT_THREADS, help="Threads (stress plugin)"
+    )
+    run_plugin_parser.add_argument(
+        "--duration", type=int, default=DEFAULT_DURATION, help="Duration (stress plugin)"
+    )
+    run_plugin_parser.add_argument(
+        "--payload", type=str, default=DEFAULT_PAYLOAD, help="Payload (exploit plugin)"
+    )
+    run_plugin_parser.add_argument(
+        "--format",
+        type=str,
+        default=OUTPUT_TEXT,
+        choices=[OUTPUT_TEXT, OUTPUT_JSON, OUTPUT_CSV],
+        help="Output format (scan plugin)",
+    )
+
+    # -- mcp-server sub-command
+    subparsers.add_parser("mcp-server", help="Start the MCP stdio server")
+
+    # -- providers sub-command
+    subparsers.add_parser("providers", help="Show provider availability")
+
+    # -- hf-analyze sub-command
+    hf_parser = subparsers.add_parser(
+        "hf-analyze", help="Scan then analyse results with Hugging Face AI"
+    )
+    hf_parser.add_argument("target", type=str, help="Target IP/hostname/CIDR")
+    hf_parser.add_argument(
+        "--model", type=str, default=HF_DEFAULT_MODEL, help="Hugging Face model ID"
+    )
+    hf_parser.add_argument(
+        "--timeout", type=float, default=HF_DEFAULT_TIMEOUT, help="API timeout (seconds)"
+    )
+
+    # -- modal-scan sub-command
+    modal_parser = subparsers.add_parser("modal-scan", help="Run scan on Modal cloud")
+    modal_parser.add_argument("target", type=str, help="Target IP/hostname/CIDR")
+    modal_parser.add_argument(
+        "--format",
+        type=str,
+        default=OUTPUT_TEXT,
+        choices=[OUTPUT_TEXT, OUTPUT_JSON, OUTPUT_CSV],
+        help="Output format (default: text)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "version":
         print(f"Terminal Pressure v{__version__}")
         print(f"Author: {__author__}")
+
     elif args.command == "scan":
         scan_vulns(args.target, output_format=args.format)
+
     elif args.command == "stress":
         stress_test(args.target, args.port, args.threads, args.duration)
+
     elif args.command == "exploit":
         exploit_chain(args.target, args.payload)
+
+    elif args.command == "list-plugins":
+        plugins = list_plugins()
+        print("Registered plugins:")
+        for p in plugins:
+            print(f"  {p.name:<20} {p.description}")
+
+    elif args.command == "run-plugin":
+        try:
+            plugin = get_plugin(args.plugin_name)
+        except KeyError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        kwargs: dict[str, Any] = {"target": args.target}
+        if args.plugin_name == "scan":
+            kwargs["output_format"] = args.format
+        elif args.plugin_name == "stress":
+            kwargs.update(
+                {"port": args.port, "threads": args.threads, "duration": args.duration}
+            )
+        elif args.plugin_name == "exploit":
+            kwargs["payload"] = args.payload
+        result = plugin.run(**kwargs)
+        print(json.dumps(result, indent=2))
+
+    elif args.command == "mcp-server":
+        run_mcp_server()
+
+    elif args.command == "providers":
+        hf = HuggingFaceProvider()
+        modal = ModalProvider()
+        print("Provider status:")
+        hf_status = "[OK] available" if hf.available else "[--] unavailable (set HF_TOKEN env var)"
+        modal_status = (
+            "[OK] available" if modal.available
+            else "[--] unavailable (pip install modal)"
+        )
+        print(f"  huggingface  {hf_status}")
+        print(f"  modal        {modal_status}")
+
+    elif args.command == "hf-analyze":
+        provider = HuggingFaceProvider()
+        if not provider.available:
+            print(
+                "Error: HuggingFace provider not available. "
+                "Set the HF_TOKEN environment variable.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        scan_result = scan_vulns(args.target)
+        analysis = provider.analyze_scan(scan_result, model=args.model, timeout=args.timeout)
+        print(json.dumps(analysis, indent=2))
+
+    elif args.command == "modal-scan":
+        provider = ModalProvider()
+        if not provider.available:
+            print(
+                "Error: Modal provider not available. Run: pip install modal",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        result = provider.run_scan(args.target, output_format=args.format)
+        print(json.dumps(result, indent=2))
+
     else:
         parser.print_help()
 

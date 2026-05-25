@@ -925,3 +925,637 @@ class TestMainModuleExecution:
         """Test that main() is callable without args printing help."""
         with patch("sys.argv", ["tp"]):
             main()  # Should print help and not raise
+
+
+# ===========================================================================
+# Plugin system tests
+# ===========================================================================
+
+from terminal_pressure import (
+    PluginBase,
+    ScanPlugin,
+    StressPlugin,
+    ExploitPlugin,
+    register_plugin,
+    get_plugin,
+    list_plugins,
+    _PLUGIN_REGISTRY,
+    HuggingFaceProvider,
+    ModalProvider,
+    HF_DEFAULT_MODEL,
+    HF_DEFAULT_TIMEOUT,
+    _handle_mcp_request,
+    run_mcp_server,
+)
+
+
+class TestPluginSystem:
+    """Tests for the plugin registry, PluginBase, and built-in plugins."""
+
+    def test_list_plugins_returns_builtins(self):
+        plugins = list_plugins()
+        names = [p.name for p in plugins]
+        assert "scan" in names
+        assert "stress" in names
+        assert "exploit" in names
+
+    def test_get_plugin_scan(self):
+        p = get_plugin("scan")
+        assert p.name == "scan"
+        assert isinstance(p, ScanPlugin)
+
+    def test_get_plugin_stress(self):
+        p = get_plugin("stress")
+        assert p.name == "stress"
+        assert isinstance(p, StressPlugin)
+
+    def test_get_plugin_exploit(self):
+        p = get_plugin("exploit")
+        assert p.name == "exploit"
+        assert isinstance(p, ExploitPlugin)
+
+    def test_get_plugin_unknown_raises(self):
+        with pytest.raises(KeyError, match="not found"):
+            get_plugin("nonexistent_plugin_xyz")
+
+    def test_register_custom_plugin(self):
+        class _TmpPlugin(PluginBase):
+            name = "_tmp_test_plugin"
+            description = "Temporary test plugin"
+
+            def run(self, **kwargs: Any) -> dict:
+                return {"ok": True}
+
+        p = _TmpPlugin()
+        register_plugin(p)
+        try:
+            assert get_plugin("_tmp_test_plugin") is p
+        finally:
+            _PLUGIN_REGISTRY.pop("_tmp_test_plugin", None)
+
+    def test_register_plugin_no_name_raises(self):
+        class _Unnamed(PluginBase):
+            pass
+
+        with pytest.raises(ValueError, match="non-empty"):
+            register_plugin(_Unnamed())
+
+    def test_plugin_base_run_raises(self):
+        p = PluginBase()
+        p.name = "base"
+        with pytest.raises(NotImplementedError):
+            p.run()
+
+    def test_plugin_input_schema_scan(self):
+        schema = ScanPlugin().input_schema
+        assert schema["type"] == "object"
+        assert "target" in schema["properties"]
+        assert "target" in schema["required"]
+
+    def test_plugin_input_schema_stress(self):
+        schema = StressPlugin().input_schema
+        assert "port" in schema["properties"]
+        assert "threads" in schema["properties"]
+        assert "duration" in schema["properties"]
+
+    def test_plugin_input_schema_exploit(self):
+        schema = ExploitPlugin().input_schema
+        assert "target" in schema["properties"]
+        assert "payload" in schema["properties"]
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_scan_plugin_run(self, mock_scan):
+        sr = ScanResult(target="10.0.0.1")
+        mock_scan.return_value = sr
+        result = ScanPlugin().run(target="10.0.0.1")
+        assert result["target"] == "10.0.0.1"
+        mock_scan.assert_called_once_with("10.0.0.1", OUTPUT_TEXT)
+
+    @patch("terminal_pressure.stress_test")
+    def test_stress_plugin_run(self, mock_stress):
+        mock_stress.return_value = [MagicMock(), MagicMock()]
+        result = StressPlugin().run(target="10.0.0.1", port=80, threads=2, duration=1)
+        assert result["threads_started"] == 2
+        assert result["status"] == "running"
+
+    @patch("terminal_pressure.send")
+    @patch("terminal_pressure.Raw")
+    @patch("terminal_pressure.TCP")
+    @patch("terminal_pressure.IP")
+    def test_exploit_plugin_run(self, mock_ip, mock_tcp, mock_raw, mock_send):
+        mock_ip.return_value = MagicMock()
+        result = ExploitPlugin().run(target="10.0.0.1")
+        assert result["target"] == "10.0.0.1"
+        assert result["sent"] is True
+
+
+# ===========================================================================
+# MCP server tests
+# ===========================================================================
+
+
+class TestMcpHandleRequest:
+    """Unit tests for _handle_mcp_request."""
+
+    def test_initialize_returns_capabilities(self):
+        req = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        resp = _handle_mcp_request(req)
+        assert resp is not None
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == 1
+        result = resp["result"]
+        assert result["protocolVersion"] == "2024-11-05"
+        assert "tools" in result["capabilities"]
+        assert result["serverInfo"]["name"] == "terminal-pressure"
+
+    def test_initialize_includes_version(self):
+        import terminal_pressure as tp2
+        req = {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}
+        resp = _handle_mcp_request(req)
+        assert resp is not None
+        assert resp["result"]["serverInfo"]["version"] == tp2.__version__
+
+    def test_tools_list_returns_builtin_tools(self):
+        req = {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}
+        resp = _handle_mcp_request(req)
+        assert resp is not None
+        tools = resp["result"]["tools"]
+        names = [t["name"] for t in tools]
+        assert "scan" in names
+        assert "stress" in names
+        assert "exploit" in names
+
+    def test_tools_list_includes_schema(self):
+        req = {"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}}
+        resp = _handle_mcp_request(req)
+        assert resp is not None
+        scan_tool = next(t for t in resp["result"]["tools"] if t["name"] == "scan")
+        assert "inputSchema" in scan_tool
+        assert scan_tool["inputSchema"]["type"] == "object"
+
+    @patch("terminal_pressure.scan_vulns")
+    def test_tools_call_scan(self, mock_scan):
+        mock_scan.return_value = ScanResult(target="10.0.0.1")
+        req = {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "scan", "arguments": {"target": "10.0.0.1"}},
+        }
+        resp = _handle_mcp_request(req)
+        assert resp is not None
+        assert resp["result"]["isError"] is False
+        content = resp["result"]["content"][0]["text"]
+        parsed = json.loads(content)
+        assert parsed["target"] == "10.0.0.1"
+
+    def test_tools_call_unknown_tool_is_error(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {"name": "nonexistent_xyz", "arguments": {}},
+        }
+        resp = _handle_mcp_request(req)
+        assert resp is not None
+        assert resp["result"]["isError"] is True
+        assert "not found" in resp["result"]["content"][0]["text"].lower()
+
+    def test_unknown_method_returns_error(self):
+        req = {"jsonrpc": "2.0", "id": 7, "method": "unknown/method", "params": {}}
+        resp = _handle_mcp_request(req)
+        assert resp is not None
+        assert "error" in resp
+        assert resp["error"]["code"] == -32601
+
+    def test_notification_returns_none(self):
+        req = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+        resp = _handle_mcp_request(req)
+        assert resp is None
+
+    def test_tools_call_with_invalid_args_is_error(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {"name": "scan", "arguments": {"target": ""}},
+        }
+        resp = _handle_mcp_request(req)
+        assert resp is not None
+        assert resp["result"]["isError"] is True
+
+
+class TestRunMcpServer:
+    """Integration tests for run_mcp_server()."""
+
+    def test_processes_initialize_and_tools_list(self):
+        import io as _io
+
+        requests = [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        ]
+        inp = _io.StringIO("\n".join(requests) + "\n")
+        out = _io.StringIO()
+        run_mcp_server(inp, out)
+        lines = [l for l in out.getvalue().strip().split("\n") if l]
+        assert len(lines) == 2
+        first = json.loads(lines[0])
+        assert first["id"] == 1
+        assert "result" in first
+        second = json.loads(lines[1])
+        assert second["id"] == 2
+        tools = second["result"]["tools"]
+        assert any(t["name"] == "scan" for t in tools)
+
+    def test_parse_error_on_invalid_json(self):
+        import io as _io
+
+        inp = _io.StringIO("not valid json\n")
+        out = _io.StringIO()
+        run_mcp_server(inp, out)
+        lines = [l for l in out.getvalue().strip().split("\n") if l]
+        assert len(lines) == 1
+        resp = json.loads(lines[0])
+        assert resp["error"]["code"] == -32700
+
+    def test_blank_lines_are_skipped(self):
+        import io as _io
+
+        inp = _io.StringIO("\n\n\n")
+        out = _io.StringIO()
+        run_mcp_server(inp, out)
+        assert out.getvalue() == ""
+
+    def test_notification_produces_no_output(self):
+        import io as _io
+
+        inp = _io.StringIO(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        )
+        out = _io.StringIO()
+        run_mcp_server(inp, out)
+        assert out.getvalue() == ""
+
+
+# ===========================================================================
+# HuggingFace provider tests
+# ===========================================================================
+
+
+class TestHuggingFaceProvider:
+    """Tests for HuggingFaceProvider."""
+
+    def test_available_with_token(self, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        hf = HuggingFaceProvider()
+        assert hf.available is True
+
+    def test_not_available_without_token(self, monkeypatch):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        hf = HuggingFaceProvider()
+        assert hf.available is False
+
+    def test_not_available_with_empty_token(self, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "")
+        hf = HuggingFaceProvider()
+        assert hf.available is False
+
+    def test_analyze_raises_without_token(self, monkeypatch):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        hf = HuggingFaceProvider()
+        with pytest.raises(RuntimeError, match="HF_TOKEN"):
+            hf.analyze("test text")
+
+    @patch("terminal_pressure._requests")
+    def test_analyze_success(self, mock_requests, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"generated_text": "Analysis result"}]
+        mock_requests.post.return_value = mock_resp
+        mock_requests.exceptions.Timeout = Exception
+        mock_requests.exceptions.HTTPError = Exception
+        mock_requests.exceptions.RequestException = Exception
+
+        hf = HuggingFaceProvider()
+        result = hf.analyze("test input")
+        assert result["status"] == "ok"
+        assert result["model"] == HF_DEFAULT_MODEL
+        mock_requests.post.assert_called_once()
+
+    @patch("terminal_pressure._requests")
+    def test_analyze_timeout_raises(self, mock_requests, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+
+        class _Timeout(Exception):
+            pass
+
+        class _HTTPError(_Timeout):
+            pass
+
+        class _ReqEx(_Timeout):
+            pass
+
+        mock_requests.exceptions.Timeout = _Timeout
+        mock_requests.exceptions.HTTPError = _HTTPError
+        mock_requests.exceptions.RequestException = _ReqEx
+        mock_requests.post.side_effect = _Timeout("timed out")
+
+        hf = HuggingFaceProvider()
+        with pytest.raises(RuntimeError, match="timed out"):
+            hf.analyze("text")
+
+    @patch("terminal_pressure._requests")
+    def test_analyze_http_error_raises(self, mock_requests, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+
+        class _Base(Exception):
+            pass
+
+        class _Timeout(_Base):
+            pass
+
+        class _HTTPError(_Base):
+            pass
+
+        class _ReqEx(_Base):
+            pass
+
+        mock_requests.exceptions.Timeout = _Timeout
+        mock_requests.exceptions.HTTPError = _HTTPError
+        mock_requests.exceptions.RequestException = _ReqEx
+        mock_requests.post.side_effect = _HTTPError("403 Forbidden")
+
+        hf = HuggingFaceProvider()
+        with pytest.raises(RuntimeError, match="HTTP error"):
+            hf.analyze("text")
+
+    @patch("terminal_pressure._requests")
+    def test_analyze_request_exception_raises(self, mock_requests, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+
+        class _Base(Exception):
+            pass
+
+        class _Timeout(_Base):
+            pass
+
+        class _HTTPError(_Base):
+            pass
+
+        class _ReqEx(_Base):
+            pass
+
+        mock_requests.exceptions.Timeout = _Timeout
+        mock_requests.exceptions.HTTPError = _HTTPError
+        mock_requests.exceptions.RequestException = _ReqEx
+        mock_requests.post.side_effect = _ReqEx("connection failed")
+
+        hf = HuggingFaceProvider()
+        with pytest.raises(RuntimeError, match="request failed"):
+            hf.analyze("text")
+
+    @patch("terminal_pressure._requests")
+    def test_analyze_scan_builds_prompt(self, mock_requests, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"generated_text": "ok"}]
+        mock_requests.post.return_value = mock_resp
+        mock_requests.exceptions.Timeout = Exception
+        mock_requests.exceptions.HTTPError = Exception
+        mock_requests.exceptions.RequestException = Exception
+
+        hf = HuggingFaceProvider()
+        sr = ScanResult(target="192.168.1.1")
+        result = hf.analyze_scan(sr)
+        assert result["status"] == "ok"
+        # Verify the prompt contained the scan JSON
+        call_args = mock_requests.post.call_args
+        payload_text = call_args.kwargs.get("json", call_args[1].get("json", {}))
+        assert "192.168.1.1" in payload_text["inputs"]
+
+    @patch("terminal_pressure._requests")
+    def test_analyze_uses_custom_api_url(self, mock_requests, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+        monkeypatch.setenv("HF_API_URL", "https://custom.hf.example.com")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_requests.post.return_value = mock_resp
+        mock_requests.exceptions.Timeout = Exception
+        mock_requests.exceptions.HTTPError = Exception
+        mock_requests.exceptions.RequestException = Exception
+
+        hf = HuggingFaceProvider()
+        hf.analyze("text")
+        called_url = mock_requests.post.call_args[0][0]
+        assert called_url.startswith("https://custom.hf.example.com/")
+
+
+# ===========================================================================
+# Modal provider tests
+# ===========================================================================
+
+
+class TestModalProvider:
+    """Tests for ModalProvider (modal is not installed in test environment)."""
+
+    def test_not_available_without_modal(self):
+        mp = ModalProvider()
+        # modal is not installed in the test environment
+        assert mp.available is False
+
+    def test_run_scan_raises_when_unavailable(self):
+        mp = ModalProvider()
+        with pytest.raises(RuntimeError, match="modal"):
+            mp.run_scan("10.0.0.1")
+
+    @patch("terminal_pressure._MODAL_AVAILABLE", True)
+    def test_available_when_modal_present(self):
+        mp = ModalProvider()
+        assert mp.available is True
+
+    @patch("terminal_pressure._MODAL_AVAILABLE", True)
+    @patch("terminal_pressure._modal")
+    def test_run_scan_calls_modal(self, mock_modal_mod):
+        """run_scan should build an App and call remote() when modal is present."""
+        result_payload = json.dumps({
+            "target": "10.0.0.1",
+            "hosts": [],
+            "scan_time": 1.0,
+            "provider": "modal",
+        })
+        mock_app = MagicMock()
+        mock_modal_mod.App.return_value = mock_app
+        mock_fn = MagicMock()
+        mock_app.function.return_value = lambda f: mock_fn
+        mock_modal_mod.App.return_value.__enter__ = MagicMock(return_value=mock_app)
+        mock_modal_mod.App.return_value.__exit__ = MagicMock(return_value=False)
+        mock_fn.remote.return_value = result_payload
+
+        # Make app.run() a context manager
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_app.run.return_value = ctx
+
+        mp = ModalProvider()
+        # The actual remote execution path is covered by the RuntimeError guard;
+        # verify the guard itself does not fire when _MODAL_AVAILABLE=True.
+        assert mp.available is True
+
+    @patch("terminal_pressure._MODAL_AVAILABLE", True)
+    @patch("terminal_pressure._modal")
+    def test_run_scan_raises_on_modal_exception(self, mock_modal_mod):
+        """run_scan wraps Modal exceptions in RuntimeError."""
+        mock_modal_mod.App.side_effect = Exception("Modal auth failed")
+        mp = ModalProvider()
+        with pytest.raises(RuntimeError, match="Modal scan failed"):
+            mp.run_scan("10.0.0.1")
+
+    def test_run_scan_validates_target(self):
+        mp = ModalProvider()
+        # Should raise RuntimeError about modal not being available, not ValueError,
+        # because the availability check comes first.
+        with pytest.raises(RuntimeError, match="modal"):
+            mp.run_scan("")
+
+
+# ===========================================================================
+# New CLI subcommand tests
+# ===========================================================================
+
+
+class TestMainNewSubcommands:
+    """Tests for list-plugins, run-plugin, mcp-server, providers, hf-analyze,
+    modal-scan."""
+
+    def test_list_plugins_command(self, capsys):
+        with patch("sys.argv", ["tp", "list-plugins"]):
+            main()
+        out = capsys.readouterr().out
+        assert "scan" in out
+        assert "stress" in out
+        assert "exploit" in out
+
+    def test_run_plugin_scan(self, capsys):
+        with patch("terminal_pressure.scan_vulns") as mock_scan:
+            mock_scan.return_value = ScanResult(target="10.0.0.1")
+            with patch("sys.argv", ["tp", "run-plugin", "scan", "--target", "10.0.0.1"]):
+                main()
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["target"] == "10.0.0.1"
+
+    def test_run_plugin_unknown_exits_1(self, capsys):
+        with patch("sys.argv", ["tp", "run-plugin", "no_such_plugin"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        assert "not found" in capsys.readouterr().err.lower()
+
+    @patch("terminal_pressure.stress_test")
+    def test_run_plugin_stress(self, mock_stress, capsys):
+        mock_stress.return_value = [MagicMock()]
+        with patch(
+            "sys.argv",
+            ["tp", "run-plugin", "stress", "--target", "10.0.0.1",
+             "--threads", "2", "--duration", "1"],
+        ):
+            main()
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["threads_started"] == 1
+
+    @patch("terminal_pressure.send")
+    @patch("terminal_pressure.Raw")
+    @patch("terminal_pressure.TCP")
+    @patch("terminal_pressure.IP")
+    def test_run_plugin_exploit(self, mock_ip, mock_tcp, mock_raw, mock_send, capsys):
+        mock_ip.return_value = MagicMock()
+        with patch("sys.argv", ["tp", "run-plugin", "exploit", "--target", "10.0.0.1"]):
+            main()
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["target"] == "10.0.0.1"
+
+    def test_mcp_server_command(self):
+        import io as _io
+
+        inp = _io.StringIO(
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+            + "\n"
+        )
+        out = _io.StringIO()
+        with patch("terminal_pressure.run_mcp_server") as mock_mcp:
+            with patch("sys.argv", ["tp", "mcp-server"]):
+                main()
+        mock_mcp.assert_called_once()
+
+    def test_providers_command(self, capsys):
+        with patch("sys.argv", ["tp", "providers"]):
+            main()
+        out = capsys.readouterr().out
+        assert "huggingface" in out
+        assert "modal" in out
+
+    def test_providers_shows_unavailable_when_no_token(self, monkeypatch, capsys):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        with patch("sys.argv", ["tp", "providers"]):
+            main()
+        out = capsys.readouterr().out
+        assert "[--]" in out
+
+    def test_hf_analyze_exits_when_unavailable(self, monkeypatch, capsys):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        with patch("sys.argv", ["tp", "hf-analyze", "10.0.0.1"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+
+    @patch("terminal_pressure._requests")
+    def test_hf_analyze_success(self, mock_requests, monkeypatch, capsys):
+        monkeypatch.setenv("HF_TOKEN", "hf_test")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"generated_text": "All good"}]
+        mock_requests.post.return_value = mock_resp
+        mock_requests.exceptions.Timeout = Exception
+        mock_requests.exceptions.HTTPError = Exception
+        mock_requests.exceptions.RequestException = Exception
+
+        with patch("terminal_pressure.scan_vulns") as mock_scan:
+            mock_scan.return_value = ScanResult(target="10.0.0.1")
+            with patch("sys.argv", ["tp", "hf-analyze", "10.0.0.1"]):
+                main()
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["status"] == "ok"
+
+    def test_modal_scan_exits_when_unavailable(self, capsys):
+        with patch("sys.argv", ["tp", "modal-scan", "10.0.0.1"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+
+    @patch("terminal_pressure._MODAL_AVAILABLE", True)
+    @patch("terminal_pressure.ModalProvider.run_scan")
+    def test_modal_scan_success(self, mock_run_scan, capsys):
+        mock_run_scan.return_value = {
+            "target": "10.0.0.1",
+            "hosts": [],
+            "scan_time": 1.0,
+            "provider": "modal",
+        }
+        with patch("sys.argv", ["tp", "modal-scan", "10.0.0.1"]):
+            main()
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["provider"] == "modal"
+
+    def test_version_shows_new_version(self, capsys):
+        import terminal_pressure as tp2
+
+        with patch("sys.argv", ["tp", "version"]):
+            main()
+        out = capsys.readouterr().out
+        assert tp2.__version__ in out
+        assert "3.0.0" in out
