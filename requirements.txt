@@ -1,5 +1,5 @@
-python-nmap
-scapy
+python-nmap>=0.7.1,<0.8
+scapy>=2.5.0,<2.7
 pytest>=7.0.0
 pytest-cov>=4.0.0
 pytest-mock>=3.10.0

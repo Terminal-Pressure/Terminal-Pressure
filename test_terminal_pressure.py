@@ -10,13 +10,10 @@ Run with:
     pytest test_terminal_pressure.py -v --cov=terminal_pressure
 """
 
-import argparse
 import json
 import socket
-import sys
-import threading
 from typing import Any
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -76,7 +73,7 @@ def mock_scanner():
     scanner[host]["tcp"].keys.return_value = [80, 443]
 
     def port_info(port: int) -> dict[str, Any]:
-        info = {"state": "open", "name": "http" if port == 80 else "https"}
+        info: dict[str, Any] = {"state": "open", "name": "http" if port == 80 else "https"}
         if port == 80:
             info["script"] = {"http-vuln-cve2017-1000353": "VULNERABLE"}
         return info
@@ -475,18 +472,24 @@ class TestMain:
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_defaults(self, mock_stress):
+        thread = MagicMock()
+        mock_stress.return_value = [thread]
         with patch("sys.argv", ["tp", "stress", "example.com"]):
             main()
         mock_stress.assert_called_once_with("example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION)
+        thread.join.assert_called_once()
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_custom_args(self, mock_stress):
+        thread = MagicMock()
+        mock_stress.return_value = [thread]
         with patch(
             "sys.argv",
             ["tp", "stress", "example.com", "--port", "9090", "--threads", "10", "--duration", "5"],
         ):
             main()
         mock_stress.assert_called_once_with("example.com", 9090, 10, 5)
+        thread.join.assert_called_once()
 
     @patch("terminal_pressure.exploit_chain")
     def test_exploit_command_dispatches_default(self, mock_exploit):
@@ -854,15 +857,17 @@ class TestExploitChainReturnValue:
 class TestResolveHostname:
     """Tests for _resolve_hostname function."""
 
-    @patch("terminal_pressure.socket.gethostbyname")
-    def test_successful_resolution(self, mock_gethostbyname):
-        mock_gethostbyname.return_value = "93.184.216.34"
+    @patch("terminal_pressure.socket.getaddrinfo")
+    def test_successful_resolution(self, mock_getaddrinfo):
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
+        ]
         result = _resolve_hostname("example.com")
         assert result == "93.184.216.34"
 
-    @patch("terminal_pressure.socket.gethostbyname")
-    def test_failed_resolution_returns_none(self, mock_gethostbyname):
-        mock_gethostbyname.side_effect = socket.gaierror("DNS lookup failed")
+    @patch("terminal_pressure.socket.getaddrinfo")
+    def test_failed_resolution_returns_none(self, mock_getaddrinfo):
+        mock_getaddrinfo.side_effect = socket.gaierror("DNS lookup failed")
         result = _resolve_hostname("nonexistent.invalid")
         assert result is None
 

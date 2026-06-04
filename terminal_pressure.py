@@ -18,8 +18,10 @@ import argparse
 import csv
 import io
 import ipaddress
+import itertools
 import json
 import logging
+import os
 import re
 import socket
 import threading
@@ -29,7 +31,7 @@ from typing import Any, Optional
 
 # External dependencies (pip install python-nmap scapy)
 import nmap
-from scapy.all import IP, TCP, Raw, send  # type: ignore[import]
+from scapy.all import IP, TCP, Raw, send  # type: ignore[import,attr-defined]
 
 # ---------------------------------------------------------------------------
 # Version Info
@@ -60,9 +62,7 @@ OUTPUT_CSV: str = "csv"
 # ---------------------------------------------------------------------------
 # Logging configuration
 # ---------------------------------------------------------------------------
-import os as _os
-
-_log_level = _os.environ.get("TP_LOG_LEVEL", "INFO").upper()
+_log_level = os.environ.get("TP_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, _log_level, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -223,13 +223,13 @@ def _resolve_hostname(hostname: str, timeout: float = DNS_TIMEOUT) -> Optional[s
     Returns:
         Resolved IP address or None if resolution fails.
     """
-    socket.setdefaulttimeout(timeout)
     try:
-        return socket.gethostbyname(hostname)
+        infos = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
+        if not infos:
+            return None
+        return infos[0][4][0]
     except socket.gaierror:
         return None
-    finally:
-        socket.setdefaulttimeout(None)
 
 
 # Maximum hosts to scan from CIDR to prevent memory/performance issues
@@ -253,16 +253,15 @@ def _expand_cidr(cidr: str) -> list[str]:
     """
     try:
         network = ipaddress.ip_network(cidr, strict=False)
-        hosts = list(network.hosts())
+        hosts = [str(ip) for ip in itertools.islice(network.hosts(), MAX_CIDR_HOSTS + 1)]
         if len(hosts) > MAX_CIDR_HOSTS:
             logger.warning(
-                "CIDR %s contains %d hosts; limiting to first %d",
+                "CIDR %s exceeds safe host limit; limiting to first %d",
                 cidr,
-                len(hosts),
                 MAX_CIDR_HOSTS,
             )
             hosts = hosts[:MAX_CIDR_HOSTS]
-        return [str(ip) for ip in hosts]
+        return hosts
     except ValueError:
         return []
 
@@ -659,7 +658,12 @@ def main() -> None:
     elif args.command == "scan":
         scan_vulns(args.target, output_format=args.format)
     elif args.command == "stress":
-        stress_test(args.target, args.port, args.threads, args.duration)
+        worker_threads = stress_test(args.target, args.port, args.threads, args.duration)
+        try:
+            for thread in worker_threads:
+                thread.join()
+        except KeyboardInterrupt:
+            logger.warning("Stress test interrupted by user.")
     elif args.command == "exploit":
         exploit_chain(args.target, args.payload)
     else:

@@ -64,7 +64,6 @@ jobs:
 
     - name: Run pip-audit
       run: pip-audit --requirement requirements.txt
-      continue-on-error: true
 
   codeql:
     name: CodeQL
@@ -144,9 +143,8 @@ jobs:
 
     - name: Run Bandit
       run: |
-        bandit -c pyproject.toml -r . -f json -o bandit-report.json || true
-        bandit -c pyproject.toml -r . -f screen
-      continue-on-error: true
+        bandit -c pyproject.toml -r . -lll -f json -o bandit-report.json
+        bandit -c pyproject.toml -r . -lll -f screen
 
     - name: Upload Bandit results
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
