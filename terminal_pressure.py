@@ -75,9 +75,11 @@ logger = logging.getLogger(__name__)
 # Data classes for structured results
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PortResult:
     """Result of scanning a single port."""
+
     port: int
     protocol: str
     state: str
@@ -88,6 +90,7 @@ class PortResult:
 @dataclass
 class HostResult:
     """Result of scanning a single host."""
+
     host: str
     ports: list[PortResult] = field(default_factory=list)
 
@@ -95,6 +98,7 @@ class HostResult:
 @dataclass
 class ScanResult:
     """Complete scan result."""
+
     target: str
     hosts: list[HostResult] = field(default_factory=list)
     scan_time: float = 0.0
@@ -118,20 +122,23 @@ class ScanResult:
                 scripts_str = "; ".join(
                     f"{k}: {v}" for k, v in port_result.scripts.items()
                 )
-                writer.writerow([
-                    host_result.host,
-                    port_result.port,
-                    port_result.protocol,
-                    port_result.state,
-                    port_result.service,
-                    scripts_str,
-                ])
+                writer.writerow(
+                    [
+                        host_result.host,
+                        port_result.port,
+                        port_result.protocol,
+                        port_result.state,
+                        port_result.service,
+                        scripts_str,
+                    ]
+                )
         return output.getvalue()
 
 
 @dataclass
 class StressResult:
     """Result of stress test."""
+
     target: str
     port: int
     threads: int
@@ -147,6 +154,7 @@ class StressResult:
 @dataclass
 class ExploitResult:
     """Result of exploit chain execution."""
+
     target: str
     payload: str
     sent: bool = False
@@ -160,6 +168,7 @@ class ExploitResult:
 # ---------------------------------------------------------------------------
 # Input validation helpers
 # ---------------------------------------------------------------------------
+
 
 def _is_valid_ip(target: str) -> bool:
     """Check if target is a valid IP address.
@@ -227,7 +236,7 @@ def _resolve_hostname(hostname: str, timeout: float = DNS_TIMEOUT) -> Optional[s
         infos = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
         if not infos:
             return None
-        return infos[0][4][0]
+        return str(infos[0][4][0])
     except socket.gaierror:
         return None
 
@@ -253,7 +262,9 @@ def _expand_cidr(cidr: str) -> list[str]:
     """
     try:
         network = ipaddress.ip_network(cidr, strict=False)
-        hosts = [str(ip) for ip in itertools.islice(network.hosts(), MAX_CIDR_HOSTS + 1)]
+        hosts = [
+            str(ip) for ip in itertools.islice(network.hosts(), MAX_CIDR_HOSTS + 1)
+        ]
         if len(hosts) > MAX_CIDR_HOSTS:
             logger.warning(
                 "CIDR %s exceeds safe host limit; limiting to first %d",
@@ -287,7 +298,9 @@ def _validate_target(target: str) -> str:
     target = target.strip()
 
     # Check if it's a valid IP, CIDR, or hostname
-    if not (_is_valid_ip(target) or _is_valid_cidr(target) or _is_valid_hostname(target)):
+    if not (
+        _is_valid_ip(target) or _is_valid_cidr(target) or _is_valid_hostname(target)
+    ):
         raise ValueError(
             f"Target must be a valid IP address, CIDR notation, or hostname, got {target!r}."
         )
@@ -344,9 +357,13 @@ def _validate_duration(duration: int) -> int:
         ValueError: If *duration* is less than 1.
     """
     if not isinstance(duration, int) or duration < 1:
-        raise ValueError(f"Duration must be a positive integer (seconds), got {duration!r}.")
+        raise ValueError(
+            f"Duration must be a positive integer (seconds), got {duration!r}."
+        )
     if duration > MAX_DURATION:
-        raise ValueError(f"Duration cannot exceed {MAX_DURATION} seconds, got {duration}.")
+        raise ValueError(
+            f"Duration cannot exceed {MAX_DURATION} seconds, got {duration}."
+        )
     return duration
 
 
@@ -371,6 +388,7 @@ def _validate_output_format(fmt: str) -> str:
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
+
 
 def scan_vulns(target: str, output_format: str = OUTPUT_TEXT) -> ScanResult:
     """Perform a vulnerability scan against *target* using nmap.
@@ -510,7 +528,11 @@ def stress_test(
     duration = _validate_duration(duration)
 
     logger.info(
-        "Applying pressure to %s:%d with %d threads for %ds", target, port, threads, duration
+        "Applying pressure to %s:%d with %d threads for %ds",
+        target,
+        port,
+        threads,
+        duration,
     )
 
     def flood() -> None:
@@ -522,7 +544,9 @@ def stress_test(
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(SOCKET_TIMEOUT)
                 sock.connect((target, port))
-                sock.sendall(b"GET / HTTP/1.1\r\nHost: " + target.encode() + b"\r\n\r\n")
+                sock.sendall(
+                    b"GET / HTTP/1.1\r\nHost: " + target.encode() + b"\r\n\r\n"
+                )
             except OSError:
                 # Connection refused / timeout / DNS failure – keep going
                 pass
@@ -572,9 +596,15 @@ def exploit_chain(target: str, payload: str = DEFAULT_PAYLOAD) -> ExploitResult:
     result = ExploitResult(target=target, payload=payload)
 
     if payload == DEFAULT_PAYLOAD:
-        logger.info("Injecting backdoor sim on %s (authorised pentest simulation)", target)
+        logger.info(
+            "Injecting backdoor sim on %s (authorised pentest simulation)", target
+        )
         try:
-            pkt = IP(dst=target) / TCP(dport=EXPLOIT_PORT, flags="S") / Raw(load=EXPLOIT_MAGIC)
+            pkt = (
+                IP(dst=target)
+                / TCP(dport=EXPLOIT_PORT, flags="S")
+                / Raw(load=EXPLOIT_MAGIC)
+            )
             send(pkt, verbose=0)
             result.sent = True
         except Exception as exc:
@@ -591,6 +621,7 @@ def exploit_chain(target: str, payload: str = DEFAULT_PAYLOAD) -> ExploitResult:
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     """Parse CLI arguments and dispatch to the appropriate function.
@@ -658,7 +689,9 @@ def main() -> None:
     elif args.command == "scan":
         scan_vulns(args.target, output_format=args.format)
     elif args.command == "stress":
-        worker_threads = stress_test(args.target, args.port, args.threads, args.duration)
+        worker_threads = stress_test(
+            args.target, args.port, args.threads, args.duration
+        )
         try:
             for thread in worker_threads:
                 thread.join()
