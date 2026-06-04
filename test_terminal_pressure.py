@@ -10,13 +10,10 @@ Run with:
     pytest test_terminal_pressure.py -v --cov=terminal_pressure
 """
 
-import argparse
 import json
 import socket
-import sys
-import threading
 from typing import Any
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -76,7 +73,10 @@ def mock_scanner():
     scanner[host]["tcp"].keys.return_value = [80, 443]
 
     def port_info(port: int) -> dict[str, Any]:
-        info = {"state": "open", "name": "http" if port == 80 else "https"}
+        info: dict[str, Any] = {
+            "state": "open",
+            "name": "http" if port == 80 else "https",
+        }
         if port == 80:
             info["script"] = {"http-vuln-cve2017-1000353": "VULNERABLE"}
         return info
@@ -199,7 +199,9 @@ class TestScanVulns:
     def test_scan_called_with_correct_args(self, MockScanner, mock_scanner):
         MockScanner.return_value = mock_scanner
         scan_vulns("192.168.1.1")
-        mock_scanner.scan.assert_called_once_with("192.168.1.1", PORT_SCAN_RANGE, "-sV --script vuln")
+        mock_scanner.scan.assert_called_once_with(
+            "192.168.1.1", PORT_SCAN_RANGE, "-sV --script vuln"
+        )
 
     @patch("terminal_pressure.nmap.PortScanner")
     def test_scan_logs_host(self, MockScanner, mock_scanner, caplog):
@@ -261,7 +263,9 @@ class TestScanVulns:
         import nmap
 
         MockScanner.return_value = MagicMock()
-        MockScanner.return_value.scan.side_effect = nmap.PortScannerError("nmap not found")
+        MockScanner.return_value.scan.side_effect = nmap.PortScannerError(
+            "nmap not found"
+        )
         with pytest.raises(nmap.PortScannerError):
             scan_vulns("192.168.1.1")
 
@@ -278,8 +282,14 @@ class TestScanVulns:
         scanner[host].all_protocols.return_value = ["tcp", "udp"]
         scanner[host]["tcp"].keys.return_value = [80]
         scanner[host]["udp"].keys.return_value = [53]
-        scanner[host]["tcp"].__getitem__.return_value = {"state": "open", "name": "http"}
-        scanner[host]["udp"].__getitem__.return_value = {"state": "open", "name": "domain"}
+        scanner[host]["tcp"].__getitem__.return_value = {
+            "state": "open",
+            "name": "http",
+        }
+        scanner[host]["udp"].__getitem__.return_value = {
+            "state": "open",
+            "name": "domain",
+        }
         MockScanner.return_value = scanner
         scan_vulns("10.1.1.1")  # Must not raise
 
@@ -431,7 +441,9 @@ class TestExploitChain:
     @patch("terminal_pressure.Raw")
     @patch("terminal_pressure.TCP")
     @patch("terminal_pressure.IP")
-    def test_default_payload_logs_message(self, mock_ip, mock_tcp, mock_raw, mock_send, caplog):
+    def test_default_payload_logs_message(
+        self, mock_ip, mock_tcp, mock_raw, mock_send, caplog
+    ):
         import logging
 
         with caplog.at_level(logging.INFO):
@@ -441,9 +453,11 @@ class TestExploitChain:
     @patch("terminal_pressure.send")
     def test_target_is_stripped(self, mock_send):
         """Whitespace in target should be stripped before use."""
-        with patch("terminal_pressure.IP") as mock_ip, \
-             patch("terminal_pressure.TCP"), \
-             patch("terminal_pressure.Raw"):
+        with (
+            patch("terminal_pressure.IP") as mock_ip,
+            patch("terminal_pressure.TCP"),
+            patch("terminal_pressure.Raw"),
+        ):
             mock_ip.return_value = MagicMock()
             exploit_chain("  192.168.0.1  ")
             mock_ip.assert_called_once_with(dst="192.168.0.1")
@@ -475,18 +489,36 @@ class TestMain:
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_defaults(self, mock_stress):
+        thread = MagicMock()
+        mock_stress.return_value = [thread]
         with patch("sys.argv", ["tp", "stress", "example.com"]):
             main()
-        mock_stress.assert_called_once_with("example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION)
+        mock_stress.assert_called_once_with(
+            "example.com", DEFAULT_PORT, DEFAULT_THREADS, DEFAULT_DURATION
+        )
+        thread.join.assert_called_once()
 
     @patch("terminal_pressure.stress_test")
     def test_stress_command_dispatches_custom_args(self, mock_stress):
+        thread = MagicMock()
+        mock_stress.return_value = [thread]
         with patch(
             "sys.argv",
-            ["tp", "stress", "example.com", "--port", "9090", "--threads", "10", "--duration", "5"],
+            [
+                "tp",
+                "stress",
+                "example.com",
+                "--port",
+                "9090",
+                "--threads",
+                "10",
+                "--duration",
+                "5",
+            ],
         ):
             main()
         mock_stress.assert_called_once_with("example.com", 9090, 10, 5)
+        thread.join.assert_called_once()
 
     @patch("terminal_pressure.exploit_chain")
     def test_exploit_command_dispatches_default(self, mock_exploit):
@@ -496,7 +528,9 @@ class TestMain:
 
     @patch("terminal_pressure.exploit_chain")
     def test_exploit_command_dispatches_custom_payload(self, mock_exploit):
-        with patch("sys.argv", ["tp", "exploit", "10.0.0.1", "--payload", "my_payload"]):
+        with patch(
+            "sys.argv", ["tp", "exploit", "10.0.0.1", "--payload", "my_payload"]
+        ):
             main()
         mock_exploit.assert_called_once_with("10.0.0.1", "my_payload")
 
@@ -566,7 +600,10 @@ class TestIntegration:
         for host in ("10.0.0.1", "10.0.0.2"):
             scanner[host].all_protocols.return_value = ["tcp"]
             scanner[host]["tcp"].keys.return_value = [22]
-            scanner[host]["tcp"].__getitem__.return_value = {"state": "open", "name": "ssh"}
+            scanner[host]["tcp"].__getitem__.return_value = {
+                "state": "open",
+                "name": "ssh",
+            }
         MockScanner.return_value = scanner
 
         scan_vulns("10.0.0.0/30")  # Should not raise
@@ -587,7 +624,9 @@ class TestIntegration:
     @patch("terminal_pressure.TCP")
     @patch("terminal_pressure.IP")
     @patch("terminal_pressure.nmap.PortScanner")
-    def test_scan_then_exploit(self, MockScanner, mock_ip, mock_tcp, mock_raw, mock_send):
+    def test_scan_then_exploit(
+        self, MockScanner, mock_ip, mock_tcp, mock_raw, mock_send
+    ):
         """Calling scan_vulns then exploit_chain in sequence should not interfere."""
         scanner = MagicMock()
         scanner.all_hosts.return_value = []
@@ -854,15 +893,17 @@ class TestExploitChainReturnValue:
 class TestResolveHostname:
     """Tests for _resolve_hostname function."""
 
-    @patch("terminal_pressure.socket.gethostbyname")
-    def test_successful_resolution(self, mock_gethostbyname):
-        mock_gethostbyname.return_value = "93.184.216.34"
+    @patch("terminal_pressure.socket.getaddrinfo")
+    def test_successful_resolution(self, mock_getaddrinfo):
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
+        ]
         result = _resolve_hostname("example.com")
         assert result == "93.184.216.34"
 
-    @patch("terminal_pressure.socket.gethostbyname")
-    def test_failed_resolution_returns_none(self, mock_gethostbyname):
-        mock_gethostbyname.side_effect = socket.gaierror("DNS lookup failed")
+    @patch("terminal_pressure.socket.getaddrinfo")
+    def test_failed_resolution_returns_none(self, mock_getaddrinfo):
+        mock_getaddrinfo.side_effect = socket.gaierror("DNS lookup failed")
         result = _resolve_hostname("nonexistent.invalid")
         assert result is None
 
@@ -871,7 +912,9 @@ class TestStressResultToDict:
     """Test StressResult to_dict method."""
 
     def test_stress_result_to_dict(self):
-        sr = StressResult(target="192.168.1.1", port=80, threads=50, duration=60, started=True)
+        sr = StressResult(
+            target="192.168.1.1", port=80, threads=50, duration=60, started=True
+        )
         d = sr.to_dict()
         assert d["target"] == "192.168.1.1"
         assert d["port"] == 80
@@ -899,7 +942,10 @@ class TestScanVulnsCsvOutput:
         MockScanner.return_value = mock_scanner
         scan_vulns("192.168.1.1", output_format=OUTPUT_CSV)
         captured = capsys.readouterr()
-        assert "host,port,protocol,state,service" in captured.out or "192.168.1.1" in captured.out
+        assert (
+            "host,port,protocol,state,service" in captured.out
+            or "192.168.1.1" in captured.out
+        )
 
 
 class TestSocketCloseError:
